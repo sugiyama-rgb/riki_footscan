@@ -1,0 +1,330 @@
+"""足底ヒートマップ表示ウィジェット"""
+import math
+import numpy as np
+from PyQt6.QtWidgets import QWidget, QSizePolicy
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal
+
+
+MARGIN_TOP = 30       # 上マージン（列ラベル）
+MARGIN_LEFT = 30      # 左マージン（カラーバー＋行ラベル）
+CBAR_W = 12           # カラーバー幅 (px)
+MAX_DEPTH = 20.0      # スケール最大 (mm)
+MIN_CELL_PX = 12      # 最小セルサイズ
+DEFAULT_CELL_PX = 28  # デフォルトセルサイズ
+
+
+# UltraFoot準拠カラーストップ: (t, R, G, B)
+_STOPS = [
+    (0.00,   0,   0,   0),   # 黒
+    (0.05,   0,   0, 130),   # 濃紺
+    (0.15,   0,  20, 200),   # 青
+    (0.30,   0, 170, 200),   # シアン（落ち着き）
+    (0.45,  20, 190,  20),   # 緑（落ち着き）
+    (0.60, 200, 185,   0),   # 黄（落ち着き）
+    (0.75, 215,  75,   0),   # 橙
+    (0.85, 195,  10,  10),   # 赤
+    (1.00, 185,   0, 185),   # マゼンタ
+]
+
+
+def _depth_to_color(v: float) -> QColor:
+    """GRD値(0〜-20mm)をUltraFoot準拠の色に変換。0=黒(無接触)"""
+    if v >= 0:
+        return QColor(0, 0, 0)
+    t = min(abs(v) / MAX_DEPTH, 1.0)
+    for i in range(len(_STOPS) - 1):
+        t0, r0, g0, b0 = _STOPS[i]
+        t1, r1, g1, b1 = _STOPS[i + 1]
+        if t <= t1:
+            ratio = (t - t0) / (t1 - t0) if t1 > t0 else 1.0
+            return QColor(
+                int(r0 + ratio * (r1 - r0)),
+                int(g0 + ratio * (g1 - g0)),
+                int(b0 + ratio * (b1 - b0)),
+            )
+    return QColor(255, 0, 255)
+
+
+class HeatmapWidget(QWidget):
+    cellClicked = pyqtSignal(int, int)   # (row, col) グリッド座標
+    selectionChanged = pyqtSignal(object)  # bool mask (32×16)
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self._grid: np.ndarray = np.zeros((32, 16))
+        self._overlay: np.ndarray | None = None
+        self._overlay_boundary: np.ndarray | None = None
+        self._sel_mask: np.ndarray = np.zeros((32, 16), dtype=bool)
+        self._is_selecting = False
+        self._is_deselecting = False
+        self._select_mode = False
+        self._meta_center: tuple | None = None
+        self._mirror_mask: np.ndarray | None = None
+        self._cell_px: int = DEFAULT_CELL_PX
+
+        rows, cols = 32, 16
+        self.setMinimumSize(
+            MARGIN_LEFT + cols * MIN_CELL_PX + 10,
+            rows * MIN_CELL_PX + MARGIN_TOP + 30,
+        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def _compute_cell_px(self) -> int:
+        rows, cols = 32, 16
+        avail_w = self.width() - MARGIN_LEFT - 10
+        avail_h = self.height() - MARGIN_TOP - 30
+        if avail_w <= 0 or avail_h <= 0:
+            return DEFAULT_CELL_PX
+        return max(MIN_CELL_PX, min(avail_w // cols, avail_h // rows, 50))
+
+    def resizeEvent(self, event):
+        self._cell_px = self._compute_cell_px()
+        self.update()
+        super().resizeEvent(event)
+
+    def set_grid(self, grid: np.ndarray):
+        self._grid = grid.copy()
+        self.update()
+
+    def set_overlay(self, overlay: np.ndarray | None, boundary_mask: np.ndarray | None = None):
+        self._overlay = overlay
+        self._overlay_boundary = boundary_mask
+        self.update()
+
+    def set_select_mode(self, enabled: bool):
+        self._select_mode = enabled
+        if not enabled:
+            self._sel_mask[:] = False
+        self.update()
+
+    def clear_selection(self):
+        self._sel_mask[:] = False
+        self.update()
+
+    def get_selection_mask(self) -> np.ndarray:
+        return self._sel_mask.copy()
+
+    def set_meta_center(self, rc: tuple | None):
+        self._meta_center = rc
+        self.update()
+
+    def set_mirror_mask(self, mask: np.ndarray | None):
+        self._mirror_mask = mask
+        self.update()
+
+    # ─── 座標変換 ───
+    def _grid_to_px(self, row: int, col: int) -> tuple[int, int]:
+        x = MARGIN_LEFT + col * self._cell_px
+        y = MARGIN_TOP + row * self._cell_px
+        return x, y
+
+    def _px_to_grid(self, px: float, py: float) -> tuple[int, int]:
+        col = int((px - MARGIN_LEFT) // self._cell_px)
+        row = int((py - MARGIN_TOP) // self._cell_px)
+        return row, col
+
+    def _build_overlay_path(self, mask: np.ndarray, rows: int, cols: int, cp: int) -> QPainterPath | None:
+        """bool マスクの境界をCatmull-Romスプラインで滑らかに返す"""
+        points: list[QPointF] = []
+
+        for r in range(rows - 1):
+            for c in range(cols):
+                if mask[r, c] != mask[r + 1, c]:
+                    x0, y0 = self._grid_to_px(r, c)
+                    points.append(QPointF(x0 + cp / 2, y0 + cp - 0.5))
+
+        for r in range(rows):
+            for c in range(cols - 1):
+                if mask[r, c] != mask[r, c + 1]:
+                    x0, y0 = self._grid_to_px(r, c)
+                    points.append(QPointF(x0 + cp - 0.5, y0 + cp / 2))
+
+        if len(points) < 3:
+            return None
+
+        cx = sum(pt.x() for pt in points) / len(points)
+        cy = sum(pt.y() for pt in points) / len(points)
+        points.sort(key=lambda pt: math.atan2(pt.y() - cy, pt.x() - cx))
+
+        n = len(points)
+        path = QPainterPath()
+        path.moveTo(points[0])
+        for i in range(n):
+            p0 = points[(i - 1) % n]
+            p1 = points[i]
+            p2 = points[(i + 1) % n]
+            p3 = points[(i + 2) % n]
+            ctrl1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6, p1.y() + (p2.y() - p0.y()) / 6)
+            ctrl2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6, p2.y() - (p3.y() - p1.y()) / 6)
+            path.cubicTo(ctrl1, ctrl2, p2)
+        path.closeSubpath()
+        return path
+
+    # ─── 描画 ───
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        rows, cols = self._grid.shape
+        cp = self._cell_px
+
+        # 背景: 黒
+        p.fillRect(self.rect(), QColor(0, 0, 0))
+
+        # ── カラーバー（左マージン内） ──
+        bar_h = rows * cp
+        for py in range(bar_h):
+            t = 1.0 - py / bar_h
+            color = _depth_to_color(-t * MAX_DEPTH)
+            p.fillRect(0, MARGIN_TOP + py, CBAR_W, 1, color)
+
+        # カラーバー深さラベル
+        font = QFont()
+        font.setPointSize(6)
+        p.setFont(font)
+        p.setPen(QPen(QColor(180, 180, 180), 1))
+        for depth_mm in (0, 5, 10, 15, 20):
+            t = depth_mm / MAX_DEPTH
+            py = MARGIN_TOP + int(bar_h * (1.0 - t))
+            p.drawLine(CBAR_W, py, CBAR_W + 2, py)
+            p.drawText(CBAR_W + 3, py + 4, f"{depth_mm}")
+
+        # ── グリッドセル ──
+        for r in range(rows):
+            for c in range(cols):
+                v = self._grid[r, c]
+                color = _depth_to_color(v)
+                x, y = self._grid_to_px(r, c)
+                p.fillRect(x, y, cp - 1, cp - 1, color)
+                if self._sel_mask[r, c]:
+                    p.fillRect(x, y, cp - 1, cp - 1, QColor(255, 255, 255, 100))
+                if self._mirror_mask is not None and self._mirror_mask[r, c]:
+                    p.fillRect(x, y, cp - 1, cp - 1, QColor(255, 180, 0, 80))
+
+        # オーバーレイ（メタターサルプレビュー）- 滑らかな輪郭
+        if self._overlay is not None:
+            boundary = self._overlay_boundary if self._overlay_boundary is not None else (self._overlay > 0.1)
+            path = self._build_overlay_path(boundary, rows, cols, cp)
+            if path:
+                p.save()
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                p.setBrush(QColor(0, 200, 255, 40))
+                p.setPen(QPen(QColor(0, 230, 255), 2))
+                p.drawPath(path)
+                p.restore()
+
+        # メタターサル中心マーカー
+        if self._meta_center is not None:
+            cr, cc = self._meta_center
+            ir, ic = int(cr), int(cc)
+            if 0 <= ir < rows and 0 <= ic < cols:
+                x, y = self._grid_to_px(ir, ic)
+                p.setPen(QPen(QColor(255, 80, 80), 2))
+                cx = int(x + cp // 2)
+                cy = int(y + cp // 2)
+                p.drawLine(cx - 6, cy, cx + 6, cy)
+                p.drawLine(cx, cy - 6, cx, cy + 6)
+
+        # グリッド線
+        p.setPen(QPen(QColor(50, 50, 50), 1))
+        for r in range(rows + 1):
+            y = MARGIN_TOP + r * cp
+            p.drawLine(MARGIN_LEFT, y, MARGIN_LEFT + cols * cp, y)
+        for c in range(cols + 1):
+            x = MARGIN_LEFT + c * cp
+            p.drawLine(x, MARGIN_TOP, x, MARGIN_TOP + rows * cp)
+
+        # 選択領域外周ボーダー（隣接セルが未選択の辺にのみ描画）
+        if self._sel_mask.any():
+            p.setPen(QPen(QColor(0, 230, 255), 2))
+            for r in range(rows):
+                for c in range(cols):
+                    if not self._sel_mask[r, c]:
+                        continue
+                    x, y = self._grid_to_px(r, c)
+                    if r == 0 or not self._sel_mask[r - 1, c]:
+                        p.drawLine(x, y, x + cp - 1, y)
+                    if r == rows - 1 or not self._sel_mask[r + 1, c]:
+                        p.drawLine(x, y + cp - 1, x + cp - 1, y + cp - 1)
+                    if c == 0 or not self._sel_mask[r, c - 1]:
+                        p.drawLine(x, y, x, y + cp - 1)
+                    if c == cols - 1 or not self._sel_mask[r, c + 1]:
+                        p.drawLine(x + cp - 1, y, x + cp - 1, y + cp - 1)
+
+        # ミラー選択範囲ボーダー（オレンジ）
+        if self._mirror_mask is not None and self._mirror_mask.any():
+            p.setPen(QPen(QColor(255, 180, 0), 2))
+            for r in range(rows):
+                for c in range(cols):
+                    if not self._mirror_mask[r, c]:
+                        continue
+                    x, y = self._grid_to_px(r, c)
+                    if r == 0 or not self._mirror_mask[r - 1, c]:
+                        p.drawLine(x, y, x + cp - 1, y)
+                    if r == rows - 1 or not self._mirror_mask[r + 1, c]:
+                        p.drawLine(x, y + cp - 1, x + cp - 1, y + cp - 1)
+                    if c == 0 or not self._mirror_mask[r, c - 1]:
+                        p.drawLine(x, y, x, y + cp - 1)
+                    if c == cols - 1 or not self._mirror_mask[r, c + 1]:
+                        p.drawLine(x + cp - 1, y, x + cp - 1, y + cp - 1)
+
+        # 軸ラベル（5行ごと）
+        p.setPen(QPen(QColor(160, 160, 160), 1))
+        font.setPointSize(7)
+        font.setBold(False)
+        p.setFont(font)
+        for r in range(0, rows, 5):
+            x, y = self._grid_to_px(r, 0)
+            p.drawText(CBAR_W + 3, y + cp - 4, str(r + 1))
+        for c in range(0, cols, 2):
+            x, y = self._grid_to_px(0, c)
+            p.drawText(x + 2, MARGIN_TOP - 4, str(c + 1))
+
+        # タイトル
+        font.setPointSize(9)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QPen(QColor(220, 220, 220), 1))
+        p.drawText(MARGIN_LEFT, 14, self.title)
+
+        p.end()
+
+    # ─── マウス操作 ───
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            r, c = self._px_to_grid(event.position().x(), event.position().y())
+            if 0 <= r < 32 and 0 <= c < 16:
+                ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self.cellClicked.emit(r, c)
+                if self._select_mode:
+                    if ctrl:
+                        self._is_deselecting = True
+                        self._sel_mask[r, c] = False
+                        self.selectionChanged.emit(self._sel_mask.copy())
+                        self.update()
+                    else:
+                        self._is_selecting = True
+                        self._sel_mask[r, c] = True
+                        self.selectionChanged.emit(self._sel_mask.copy())
+                        self.update()
+
+    def mouseMoveEvent(self, event):
+        if not self._select_mode:
+            return
+        r, c = self._px_to_grid(event.position().x(), event.position().y())
+        if not (0 <= r < 32 and 0 <= c < 16):
+            return
+        if self._is_selecting:
+            self._sel_mask[r, c] = True
+            self.selectionChanged.emit(self._sel_mask.copy())
+            self.update()
+        elif self._is_deselecting:
+            self._sel_mask[r, c] = False
+            self.selectionChanged.emit(self._sel_mask.copy())
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._is_selecting = False
+        self._is_deselecting = False

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 仮想環境
+venv/
+.venv/
+env/
+
+# データファイル（患者データ・テストデータ）
+*.grd
+*.gr2
+
+# 配布・インストーラー関連
+150601配布データ/
+150601配布データ.zip
+U2 softe ware/
+U2 softe ware_ケーブルインストール/
+
+# その他
+*.log
+.DS_Store
+Thumbs.db
+HANDOVER.md
