@@ -57,6 +57,14 @@ class FootModel:
         return self._grd.grid[grd_io.RIGHT_ROWS]
 
     @property
+    def base_left_grid(self) -> np.ndarray:
+        return self._base_grid[grd_io.LEFT_ROWS]
+
+    @property
+    def base_right_grid(self) -> np.ndarray:
+        return self._base_grid[grd_io.RIGHT_ROWS]
+
+    @property
     def layers(self) -> list[LayerRecord]:
         return self._layers
 

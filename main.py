@@ -285,6 +285,14 @@ class MainWindow(QMainWindow):
         self._btn_toggle_all.toggled.connect(self._on_toggle_all_layers)
         layer_layout.addWidget(self._btn_toggle_all)
 
+        self._btn_diff = QPushButton("差分表示")
+        self._btn_diff.setCheckable(True)
+        self._btn_diff.setStyleSheet(
+            "QPushButton:checked { background-color: #004422; color: #00cc66; }"
+        )
+        self._btn_diff.toggled.connect(self._on_diff_toggled)
+        layer_layout.addWidget(self._btn_diff)
+
         self._layer_list = QListWidget()
         self._layer_list.setMaximumHeight(110)
         self._layer_list.setStyleSheet("QListWidget { font-size: 11px; }")
@@ -1040,6 +1048,8 @@ class MainWindow(QMainWindow):
         ]
         self._3d_axes = []
         self._3d_wireframes = []
+        self._3d_base_wireframes: list = [None, None]
+        base_grids = [self._model.base_left_grid, self._model.base_right_grid]
         for i, (grid, label) in enumerate(feet):
             ax = fig.add_subplot(1, 2, i + 1, projection='3d')
             ax.set_facecolor('black')
@@ -1047,8 +1057,25 @@ class MainWindow(QMainWindow):
             X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
             Z = np.flipud(grid) / 10
 
-            wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
-                                   rstride=1, cstride=1, alpha=0.9)
+            # 元データサーフェスを先に描画（差分表示ONのとき）
+            if self._btn_diff.isChecked():
+                Z_base = np.flipud(base_grids[i]) / 10
+                bwf = ax.plot_surface(X, Y, Z_base, color='#666666',
+                                      rstride=1, cstride=1, alpha=1.0, edgecolor='none')
+                self._3d_base_wireframes[i] = bwf
+
+            # 修正後データの描画（差分ON=カラーマップサーフェス / OFF=青ワイヤーフレーム）
+            if self._btn_diff.isChecked():
+                import matplotlib.colors, matplotlib.cm
+                Z_diff = Z - Z_base
+                vmax = max(float(np.max(Z_diff)), 0.1)
+                norm = matplotlib.colors.Normalize(vmin=0, vmax=vmax)
+                face_colors = matplotlib.cm.plasma(norm(Z_diff))
+                wf = ax.plot_surface(X, Y, Z, facecolors=face_colors,
+                                     rstride=1, cstride=1, alpha=0.95, edgecolor='none')
+            else:
+                wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
+                                       rstride=1, cstride=1, alpha=0.9)
 
             ax.set_title(label, fontsize=12, color='white', pad=-15)
             ax.set_box_aspect([cols, rows, 2])
@@ -1161,6 +1188,7 @@ class MainWindow(QMainWindow):
         self._hm_right.set_grid(self._model.right_grid)
         self._refresh_layer_list()
         self._refresh_3d()
+        self._update_diff_overlay()
 
     def _refresh_layer_list(self):
         if not self._model:
@@ -1203,6 +1231,20 @@ class MainWindow(QMainWindow):
         msg = "全補正を一時OFFにしました" if checked else "全補正を再有効化しました"
         self._update_status(msg)
 
+    def _on_diff_toggled(self, checked: bool) -> None:
+        if not checked:
+            self._hm_left.set_diff_grid(None)
+            self._hm_right.set_diff_grid(None)
+        else:
+            self._update_diff_overlay()
+        self._refresh_3d()
+
+    def _update_diff_overlay(self) -> None:
+        if not self._model or not self._btn_diff.isChecked():
+            return
+        self._hm_left.set_diff_grid(self._model.left_grid - self._model.base_left_grid)
+        self._hm_right.set_diff_grid(self._model.right_grid - self._model.base_right_grid)
+
     def _refresh_3d(self):
         if not self._3d_canvas or not self._3d_axes or not self._model:
             return
@@ -1216,16 +1258,39 @@ class MainWindow(QMainWindow):
             xlim = ax.get_xlim3d()
             ylim = ax.get_ylim3d()
             zlim = ax.get_zlim3d()
-            # 保存済みの参照だけ削除して新しいワイヤーフレームと差し替え
+            rows, cols = grid.shape
+            X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
+            Z = np.flipud(grid) / 10
+            # 元データサーフェスを先に削除→再描画（差分表示ONのとき）
+            bwf = self._3d_base_wireframes[i] if i < len(self._3d_base_wireframes) else None
+            if bwf is not None:
+                try:
+                    bwf.remove()
+                except (ValueError, AttributeError):
+                    pass
+                self._3d_base_wireframes[i] = None
+            if hasattr(self, '_btn_diff') and self._btn_diff.isChecked():
+                base_grids = [self._model.base_left_grid, self._model.base_right_grid]
+                Z_base = np.flipud(base_grids[i]) / 10
+                bwf = ax.plot_surface(X, Y, Z_base, color='#666666',
+                                      rstride=1, cstride=1, alpha=1.0, edgecolor='none')
+                self._3d_base_wireframes[i] = bwf
+            # 修正後データの差し替え（差分ON=カラーマップサーフェス / OFF=青ワイヤーフレーム）
             try:
                 self._3d_wireframes[i].remove()
             except (ValueError, IndexError):
                 pass
-            rows, cols = grid.shape
-            X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
-            Z = np.flipud(grid) / 10
-            wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
-                                   rstride=1, cstride=1, alpha=0.9)
+            if hasattr(self, '_btn_diff') and self._btn_diff.isChecked():
+                import matplotlib.colors, matplotlib.cm
+                Z_diff = Z - Z_base
+                vmax = max(float(np.max(Z_diff)), 0.1)
+                norm = matplotlib.colors.Normalize(vmin=0, vmax=vmax)
+                face_colors = matplotlib.cm.plasma(norm(Z_diff))
+                wf = ax.plot_surface(X, Y, Z, facecolors=face_colors,
+                                     rstride=1, cstride=1, alpha=0.95, edgecolor='none')
+            else:
+                wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
+                                       rstride=1, cstride=1, alpha=0.9)
             self._3d_wireframes[i] = wf
             # autoscalingで変化した軸範囲・視点を復元
             ax.set_xlim3d(xlim)

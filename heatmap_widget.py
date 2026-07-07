@@ -3,11 +3,11 @@ import math
 import numpy as np
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
-from PyQt6.QtCore import Qt, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal, QRect
 
 
 MARGIN_TOP = 30       # 上マージン（列ラベル）
-MARGIN_LEFT = 30      # 左マージン（カラーバー＋行ラベル）
+MARGIN_LEFT = 46      # 左マージン（カラーバー＋踵距離ルーラー）
 CBAR_W = 12           # カラーバー幅 (px)
 MAX_DEPTH = 20.0      # スケール最大 (mm)
 MIN_CELL_PX = 12      # 最小セルサイズ
@@ -62,6 +62,7 @@ class HeatmapWidget(QWidget):
         self._select_mode = False
         self._meta_center: tuple | None = None
         self._mirror_mask: np.ndarray | None = None
+        self._diff_grid: np.ndarray | None = None
         self._cell_px: int = DEFAULT_CELL_PX
 
         rows, cols = 32, 16
@@ -86,6 +87,10 @@ class HeatmapWidget(QWidget):
 
     def set_grid(self, grid: np.ndarray):
         self._grid = grid.copy()
+        self.update()
+
+    def set_diff_grid(self, diff: np.ndarray | None) -> None:
+        self._diff_grid = diff
         self.update()
 
     def set_overlay(self, overlay: np.ndarray | None, boundary_mask: np.ndarray | None = None):
@@ -203,6 +208,20 @@ class HeatmapWidget(QWidget):
                 if self._mirror_mask is not None and self._mirror_mask[r, c]:
                     p.fillRect(x, y, cp - 1, cp - 1, QColor(255, 180, 0, 80))
 
+        # 差分オーバーレイ（元データとの差分を半透明カラーで表示）
+        if self._diff_grid is not None:
+            _DIFF_SCALE = 5.0
+            for r in range(rows):
+                for c in range(cols):
+                    delta = float(self._diff_grid[r, c])
+                    if abs(delta) < 0.1:
+                        continue
+                    intensity = min(abs(delta) / _DIFF_SCALE, 1.0)
+                    alpha = int(intensity * 180)
+                    x, y = self._grid_to_px(r, c)
+                    color = QColor(0, 204, 102, alpha) if delta < 0 else QColor(255, 102, 0, alpha)
+                    p.fillRect(x, y, cp - 1, cp - 1, color)
+
         # オーバーレイ（メタターサルプレビュー）- 滑らかな輪郭
         if self._overlay is not None:
             boundary = self._overlay_boundary if self._overlay_boundary is not None else (self._overlay > 0.1)
@@ -235,6 +254,18 @@ class HeatmapWidget(QWidget):
         for c in range(cols + 1):
             x = MARGIN_LEFT + c * cp
             p.drawLine(x, MARGIN_TOP, x, MARGIN_TOP + rows * cp)
+
+        # ── 中央縦ライン（col 7 / col 8 境界 = 第2中足骨基準線）──
+        x_mid = MARGIN_LEFT + 8 * cp
+        cen_pen = QPen(QColor(255, 230, 0, 180), 2)
+        cen_pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(cen_pen)
+        p.drawLine(x_mid, MARGIN_TOP, x_mid, MARGIN_TOP + rows * cp)
+        p.setPen(QPen(QColor(255, 230, 0, 210), 1))
+        font.setPointSize(6)
+        font.setBold(False)
+        p.setFont(font)
+        p.drawText(x_mid - 12, MARGIN_TOP - 3, "中央")
 
         # 選択領域外周ボーダー（隣接セルが未選択の辺にのみ描画）
         if self._sel_mask.any():
@@ -270,17 +301,33 @@ class HeatmapWidget(QWidget):
                     if c == cols - 1 or not self._mirror_mask[r, c + 1]:
                         p.drawLine(x + cp - 1, y, x + cp - 1, y + cp - 1)
 
-        # 軸ラベル（5行ごと）
-        p.setPen(QPen(QColor(160, 160, 160), 1))
+        # ── 踵距離ルーラー ──
         font.setPointSize(7)
         font.setBold(False)
         p.setFont(font)
-        for r in range(0, rows, 5):
-            x, y = self._grid_to_px(r, 0)
-            p.drawText(CBAR_W + 3, y + cp - 4, str(r + 1))
+        label_x = CBAR_W + 3
+        label_w = MARGIN_LEFT - CBAR_W - 5
+
+        for cm in range(0, 32, 5):
+            row_idx = 31 - cm
+            _, y = self._grid_to_px(row_idx, 0)
+            y_mid = y + cp // 2
+
+            if cm == 0:
+                p.setPen(QPen(QColor(140, 140, 140), 1))
+                p.drawText(QRect(label_x, y_mid - 6, label_w, 12),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "0cm")
+            else:
+                p.setPen(QPen(QColor(140, 140, 140), 1))
+                p.drawText(QRect(label_x, y_mid - 6, label_w, 12),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           f"{cm}cm")
+
+        # 列ラベル
+        p.setPen(QPen(QColor(160, 160, 160), 1))
         for c in range(0, cols, 2):
             x, y = self._grid_to_px(0, c)
-            p.drawText(x + 2, MARGIN_TOP - 4, str(c + 1))
+            p.drawText(x + 2, MARGIN_TOP - 4, str(c))
 
         # タイトル
         font.setPointSize(9)
