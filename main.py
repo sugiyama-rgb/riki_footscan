@@ -1020,6 +1020,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
 
+        if self._3d_dialog is not None:
+            self._3d_dialog.raise_()
+            self._3d_dialog.activateWindow()
+            return
+
         import matplotlib
         matplotlib.rcParams['font.family'] = ['MS Gothic', 'Meiryo', 'Yu Gothic', 'sans-serif']
 
@@ -1170,6 +1175,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         def _on_3d_closed():
+            self._3d_dialog = None
             self._3d_canvas = None
             self._3d_axes = []
             self._3d_wireframes = []
