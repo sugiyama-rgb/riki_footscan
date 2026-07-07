@@ -20,6 +20,10 @@ env/
 U2 softe ware/
 U2 softe ware_ケーブルインストール/
 
+# PyInstaller出力
+dist/
+build/
+
 # その他
 *.log
 .DS_Store
