@@ -62,6 +62,7 @@ class HeatmapWidget(QWidget):
         self._select_mode = False
         self._meta_center: tuple | None = None
         self._mirror_mask: np.ndarray | None = None
+        self._angle_guide: tuple | None = None
         self._diff_grid: np.ndarray | None = None
         self._cell_px: int = DEFAULT_CELL_PX
 
@@ -117,6 +118,10 @@ class HeatmapWidget(QWidget):
 
     def set_mirror_mask(self, mask: np.ndarray | None):
         self._mirror_mask = mask
+        self.update()
+
+    def set_angle_guide(self, line: tuple | None):
+        self._angle_guide = line  # ((row1, col1), (row2, col2)) のグリッド座標、Noneで非表示
         self.update()
 
     # ─── 座標変換 ───
@@ -245,6 +250,14 @@ class HeatmapWidget(QWidget):
                 cy = int(y + cp // 2)
                 p.drawLine(cx - 6, cy, cx + 6, cy)
                 p.drawLine(cx, cy - 6, cx, cy + 6)
+
+        # 位置調整タブの角度ガイドライン（踵中心を軸に回転させた基準線）
+        if self._angle_guide is not None:
+            (r1, c1), (r2, c2) = self._angle_guide
+            x1, y1 = self._grid_to_px(r1, c1)
+            x2, y2 = self._grid_to_px(r2, c2)
+            p.setPen(QPen(QColor(255, 60, 60), 2))
+            p.drawLine(int(x1 + cp / 2), int(y1 + cp / 2), int(x2 + cp / 2), int(y2 + cp / 2))
 
         # グリッド線
         p.setPen(QPen(QColor(50, 50, 50), 1))

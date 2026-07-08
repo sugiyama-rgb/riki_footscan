@@ -31,7 +31,7 @@ class ArchParams:
 @dataclass
 class LayerRecord:
     name: str
-    operation: str  # "noise_removal" | "erase" | "mirror_mask" | "mirror_copy" | "arch" | "metatarsal"
+    operation: str  # "noise_removal" | "erase" | "mirror_mask" | "mirror_copy" | "arch" | "metatarsal" | "position_adjust"
     params: dict
     enabled: bool = True
 
@@ -167,6 +167,55 @@ class FootModel:
         ))
 
     # ──────────────────────────────────────────
+    # 位置調整（左右・前後オフセット＋任意角度）
+    # ──────────────────────────────────────────
+    def preview_position_adjust(self, foot: str, dx_cm: float, dy_cm: float, angle_deg: float = 0.0) -> dict:
+        """モデルを変更せずに、適用した場合の失われるセル数だけを試算する"""
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        before_cells = int((self._grd.grid[sl] < 0).sum())
+        params = {"foot": foot, "dx_cm": dx_cm, "dy_cm": dy_cm, "angle_deg": angle_deg}
+        test_grid = _apply_operation(self._grd.grid.copy(), "position_adjust", params)
+        after_cells = int((test_grid[sl] < 0).sum())
+        return {
+            "before_cells": before_cells,
+            "after_cells": after_cells,
+            "lost_cells": max(0, before_cells - after_cells),
+        }
+
+    def apply_position_adjust(self, foot: str, dx_cm: float, dy_cm: float, angle_deg: float = 0.0) -> dict:
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        before_cells = int((self._grd.grid[sl] < 0).sum())
+
+        foot_label = "左足" if foot == "left" else "右足"
+        new_layer = LayerRecord(
+            name=f"位置調整 {foot_label} (左右{dx_cm:+.1f}cm/前後{dy_cm:+.1f}cm/角度{angle_deg:+.1f}°)",
+            operation="position_adjust",
+            params={"foot": foot, "dx_cm": dx_cm, "dy_cm": dy_cm, "angle_deg": angle_deg},
+        )
+
+        # 同じ足に対する position_adjust レイヤーが既にある場合は追加ではなく置き換える。
+        # 追加してしまうと、適用のたびに前回の補間結果へさらに補間をかける「多重ボケ」が
+        # 蓄積するため、常に _base_grid からの1回分の補間に保つ。
+        existing_idx = next(
+            (i for i, layer in enumerate(self._layers)
+             if layer.operation == "position_adjust" and layer.params["foot"] == foot),
+            None,
+        )
+        if existing_idx is not None:
+            self._layers[existing_idx] = new_layer
+            self._redo_stack.clear()
+            self._recompute()
+        else:
+            self._add_layer(new_layer)
+
+        after_cells = int((self._grd.grid[sl] < 0).sum())
+        return {
+            "before_cells": before_cells,
+            "after_cells": after_cells,
+            "lost_cells": max(0, before_cells - after_cells),
+        }
+
+    # ──────────────────────────────────────────
     # 内側縦アーチ調整
     # ──────────────────────────────────────────
     def apply_arch(self, foot: str, params: ArchParams) -> dict | None:
@@ -271,6 +320,28 @@ def _apply_operation(grid: np.ndarray, operation: str, params: dict) -> np.ndarr
         src_sl = grd_io.LEFT_ROWS if source == "left" else grd_io.RIGHT_ROWS
         tgt_sl = grd_io.RIGHT_ROWS if source == "left" else grd_io.LEFT_ROWS
         result[tgt_sl] = np.fliplr(result[src_sl].copy())
+
+    elif operation == "position_adjust":
+        foot = params["foot"]
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        block = result[sl]
+        dx = params.get("dx_cm", 0.0)
+        dy = params.get("dy_cm", 0.0)
+        angle = params.get("angle_deg", 0.0)
+        if dx or dy or angle:
+            theta = np.deg2rad(angle)
+            cos_t, sin_t = np.cos(theta), np.sin(theta)
+            # 出力座標→入力座標への逆写像行列（ブロック中心を軸に回転させ、その後に平行移動する）
+            inv_rot = np.array([[cos_t, sin_t], [-sin_t, cos_t]])
+            # 回転中心は踵中心（row = 各足ブロックの最終行 = 踵側、col = 幅方向の中央）
+            center = np.array([block.shape[0] - 1, (block.shape[1] - 1) / 2.0])
+            shift_vec = np.array([dy, dx])
+            offset = center - inv_rot @ (center + shift_vec)
+            block = ndimage.affine_transform(
+                block, matrix=inv_rot, offset=offset,
+                order=1, mode="constant", cval=0.0,
+            )
+        result[sl] = block
 
     elif operation == "arch":
         foot = params["foot"]

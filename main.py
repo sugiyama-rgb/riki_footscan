@@ -102,6 +102,18 @@ def _reset_marks_dirty(had_layers: bool) -> bool:
     return had_layers
 
 
+def _compute_angle_guide_line(angle_deg: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    """位置調整タブの角度ガイドライン用に、踵中心(行31・列7.5)を軸に回転させた
+    基準線（つま先側端点, 踵側端点）をグリッド座標で返す。"""
+    theta = np.deg2rad(angle_deg)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+    pivot = np.array([31.0, 7.5])
+    p_toe = pivot + rot @ (np.array([2.0, 7.5]) - pivot)
+    p_heel = pivot + rot @ (np.array([29.0, 7.5]) - pivot)
+    return (float(p_toe[0]), float(p_toe[1])), (float(p_heel[0]), float(p_heel[1]))
+
+
 def _layer_to_json_dict(layer: LayerRecord) -> dict:
     """LayerRecordをJSON化可能な辞書に変換する（np.ndarrayはlistへ変換）。"""
     params = {
@@ -424,6 +436,72 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(6)
+
+        # 位置調整
+        pos_box = QGroupBox("位置調整")
+        pos_layout = QVBoxLayout(pos_box)
+        pos_layout.setSpacing(4)
+        lbl_pos = QLabel(
+            "基準位置(踵・第2中足骨)からずれて計測された場合に、"
+            "値は変えずに位置のみ補正します。他の編集より先に行うことを推奨します。"
+        )
+        lbl_pos.setWordWrap(True)
+        pos_layout.addWidget(lbl_pos)
+
+        pos_layout.addWidget(QLabel("対象足:"))
+        self._pos_foot_combo = QComboBox()
+        self._pos_foot_combo.addItems(["左足", "右足"])
+        pos_layout.addWidget(self._pos_foot_combo)
+
+        dx_row = QHBoxLayout()
+        dx_row.addWidget(QLabel("左右方向 (cm, ＋:右／－:左):"))
+        self._pos_dx = QDoubleSpinBox()
+        self._pos_dx.setRange(-3.0, 3.0)
+        self._pos_dx.setSingleStep(1.0)  # 矢印クリック: 1.0cm(10mm)刻み。直接入力は0.1cm単位のまま
+        self._pos_dx.setDecimals(1)
+        dx_row.addWidget(self._pos_dx)
+        pos_layout.addLayout(dx_row)
+
+        dy_row = QHBoxLayout()
+        dy_row.addWidget(QLabel("前後方向 (cm, ＋:かかと側／－:つま先側):"))
+        self._pos_dy = QDoubleSpinBox()
+        self._pos_dy.setRange(-3.0, 3.0)
+        self._pos_dy.setSingleStep(1.0)  # 矢印クリック: 1.0cm(10mm)刻み。直接入力は0.1cm単位のまま
+        self._pos_dy.setDecimals(1)
+        dy_row.addWidget(self._pos_dy)
+        pos_layout.addLayout(dy_row)
+
+        self._pos_angle_check = QCheckBox("角度調整を有効にする（任意）")
+        self._pos_angle_check.toggled.connect(lambda checked: self._pos_angle.setEnabled(checked))
+        pos_layout.addWidget(self._pos_angle_check)
+
+        angle_row = QHBoxLayout()
+        angle_row.addWidget(QLabel("角度 (°):"))
+        self._pos_angle = QDoubleSpinBox()
+        self._pos_angle.setRange(-15.0, 15.0)
+        self._pos_angle.setSingleStep(0.5)
+        self._pos_angle.setDecimals(1)
+        self._pos_angle.setEnabled(False)
+        angle_row.addWidget(self._pos_angle)
+        pos_layout.addLayout(angle_row)
+
+        self._pos_angle.valueChanged.connect(self._update_position_angle_guide)
+        self._pos_angle_check.toggled.connect(self._update_position_angle_guide)
+        self._pos_foot_combo.currentIndexChanged.connect(self._update_position_angle_guide)
+
+        btn_apply_pos = QPushButton("適用")
+        btn_apply_pos.clicked.connect(self._apply_position_adjust)
+        pos_layout.addWidget(btn_apply_pos)
+
+        btn_reset_pos = QPushButton("設定値をリセット")
+        btn_reset_pos.clicked.connect(self._reset_position_adjust)
+        pos_layout.addWidget(btn_reset_pos)
+
+        self._pos_stats_label = QLabel("")
+        self._pos_stats_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
+        pos_layout.addWidget(self._pos_stats_label)
+
+        layout.addWidget(pos_box)
 
         # 自動ノイズ除去
         auto_box = QGroupBox("自動ノイズ除去")
@@ -926,6 +1004,54 @@ class MainWindow(QMainWindow):
             self._refresh_heatmaps()
             self._update_status(f"ミラーコピー: {src_label} → {tgt_label}")
 
+    def _apply_position_adjust(self):
+        if not self._model:
+            QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
+            return
+        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        dx = self._pos_dx.value()
+        dy = self._pos_dy.value()
+        angle = self._pos_angle.value() if self._pos_angle_check.isChecked() else 0.0
+        if dx == 0.0 and dy == 0.0 and angle == 0.0:
+            self._update_status("位置調整: 変更がないため適用しませんでした")
+            return
+
+        preview_stats = self._model.preview_position_adjust(foot, dx, dy, angle)
+        if preview_stats["lost_cells"] > 0:
+            reply = QMessageBox.question(
+                self, "確認",
+                f"この設定では計測データ {preview_stats['lost_cells']} セル分が"
+                "グリッド範囲外に出て失われます。適用しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        stats = self._model.apply_position_adjust(foot, dx, dy, angle)
+        self._refresh_heatmaps()
+        self._pos_stats_label.setText(f"失われたセル: {stats['lost_cells']}")
+        self._update_status(f"位置調整を適用しました（{'左足' if foot == 'left' else '右足'}）")
+
+    def _reset_position_adjust(self):
+        self._pos_dx.setValue(0.0)
+        self._pos_dy.setValue(0.0)
+        self._pos_angle.setValue(0.0)
+        self._pos_angle_check.setChecked(False)
+        self._pos_stats_label.setText("")
+        self._update_position_angle_guide()
+
+    def _update_position_angle_guide(self, *_args):
+        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        hm = self._hm_left if foot == "left" else self._hm_right
+        other = self._hm_right if foot == "left" else self._hm_left
+        other.set_angle_guide(None)
+
+        if not self._pos_angle_check.isChecked() or self._pos_angle.value() == 0.0:
+            hm.set_angle_guide(None)
+            return
+
+        hm.set_angle_guide(_compute_angle_guide_line(self._pos_angle.value()))
+
     def _on_tab_changed(self, index: int):
         if index != 2:
             self._hm_left.set_overlay(None)
@@ -935,6 +1061,9 @@ class MainWindow(QMainWindow):
             self._arch_preview_label.setText("")
             self._hm_left.set_mirror_mask(None)
             self._hm_right.set_mirror_mask(None)
+        if index != 0:
+            self._hm_left.set_angle_guide(None)
+            self._hm_right.set_angle_guide(None)
 
     # ──────────────────────────────────────────
     # アーチ調整
