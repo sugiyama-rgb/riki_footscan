@@ -418,7 +418,7 @@ class MainWindow(QMainWindow):
 
         # タブ
         tabs = QTabWidget()
-        tabs.addTab(self._build_noise_tab(), "ノイズ除去")
+        tabs.addTab(self._build_noise_tab(), "前処理")
         tabs.addTab(self._build_arch_tab(), "アーチ調整")
         tabs.addTab(self._build_meta_tab(), "メタターサル")
         tabs.addTab(self._build_patient_tab(), "患者情報")
@@ -431,7 +431,7 @@ class MainWindow(QMainWindow):
         # ステータスバー
         self.setStatusBar(QStatusBar())
 
-    # ─── ノイズ除去タブ ───
+    # ─── 前処理タブ ───
     def _build_noise_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
