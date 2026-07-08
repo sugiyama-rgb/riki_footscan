@@ -6,6 +6,7 @@ from main import (
     _layer_to_json_dict,
     _validate_save_paths,
     _validate_distinct_paths,
+    _reset_marks_dirty,
 )
 from foot_model import LayerRecord
 
@@ -121,3 +122,14 @@ def test_layer_to_json_dict_passes_through_non_array_params():
         "params": {},
         "enabled": True,
     }
+
+
+# ─────────────────────── _reset_marks_dirty ───────────────────────
+# (リセット実行前にレイヤーが存在した場合のみ「未保存の変更あり」とする)
+
+def test_reset_marks_dirty_when_layers_existed():
+    assert _reset_marks_dirty(had_layers=True) is True
+
+
+def test_reset_does_not_mark_dirty_when_no_layers_existed():
+    assert _reset_marks_dirty(had_layers=False) is False

@@ -21,6 +21,7 @@ from platformdirs import user_config_dir
 import grd_io
 from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, preview_arch_max
 from heatmap_widget import HeatmapWidget
+from toast_widget import ToastWidget
 
 
 _DEFAULT_SETTINGS: dict = {
@@ -94,6 +95,11 @@ def _build_archive_filename(
         candidate = f"{timestamp}_{stem}_{counter:03d}{suffix}"
         counter += 1
     return candidate
+
+
+def _reset_marks_dirty(had_layers: bool) -> bool:
+    """リセット実行前にレイヤーが存在した場合のみ「未保存の変更あり」とする。"""
+    return had_layers
 
 
 def _layer_to_json_dict(layer: LayerRecord) -> dict:
@@ -264,6 +270,7 @@ class MainWindow(QMainWindow):
         self._arch_params = ArchParams()
         self._meta_params = MetatarsalParams()
         self._erase_select_mode = False
+        self._dirty = False
 
         self._3d_dialog = None
         self._3d_canvas = None
@@ -287,6 +294,7 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
+        self._toast = ToastWidget(central)
         root = QHBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(0)
@@ -721,6 +729,7 @@ class MainWindow(QMainWindow):
             self._original_bytes = Path(path).read_bytes()
             self._original_filename = Path(path).name
             self._refresh_heatmaps()
+            self._dirty = False
             self._load_patient_fields()
             self._update_status(f"読み込み完了: {Path(path).name}")
         except Exception as e:
@@ -733,6 +742,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "エラー", "元データの情報がありません。GRDファイルを開き直してください。"
             )
+            return
+
+        reply = QMessageBox.question(
+            self, "確認", "この編集内容でデータが保存されますがよろしいですか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         paths_settings = self._defaults.get("paths", {})
@@ -788,7 +804,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "エラー", f"上書き保存に失敗しました:\n{e}")
             return
 
+        self._dirty = False
         self._update_status(f"保存完了: {Path(self._current_path).name} (履歴: {archive_filename})")
+        self._toast.show_message("保存されました")
 
     def _save_as_file(self):
         if not self._model:
@@ -801,7 +819,9 @@ class MainWindow(QMainWindow):
         try:
             grd_io.save(self._model.grd, path)
             self._current_path = path
+            self._dirty = False
             self._update_status(f"保存完了: {Path(path).name}")
+            self._toast.show_message("保存されました")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
 
@@ -825,8 +845,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
+                had_layers = bool(self._model.layers)
                 self._model.reset()
                 self._refresh_heatmaps()
+                self._dirty = _reset_marks_dirty(had_layers)
                 self._update_status("リセットしました")
 
     # ──────────────────────────────────────────
@@ -1346,6 +1368,7 @@ class MainWindow(QMainWindow):
     def _refresh_heatmaps(self):
         if not self._model:
             return
+        self._dirty = True
         self._hm_left.set_grid(self._model.left_grid)
         self._hm_right.set_grid(self._model.right_grid)
         self._refresh_layer_list()
@@ -1376,6 +1399,8 @@ class MainWindow(QMainWindow):
         enabled = item.checkState() == Qt.CheckState.Checked
         if self._model.layers[i].enabled != enabled:
             self._model.toggle_layer(i)
+            # _refresh_heatmaps() は呼ばないため、ここで個別に dirty をセットする
+            self._dirty = True
             self._hm_left.set_grid(self._model.left_grid)
             self._hm_right.set_grid(self._model.right_grid)
             self._refresh_3d()
@@ -1463,6 +1488,22 @@ class MainWindow(QMainWindow):
 
     def _update_status(self, msg: str):
         self.statusBar().showMessage(msg)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._toast.isVisible():
+            self._toast._reposition()
+
+    def closeEvent(self, event) -> None:
+        if self._dirty:
+            reply = QMessageBox.question(
+                self, "確認", "編集を破棄しますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()
 
 
 def _update_raw_meta(grd: grd_io.GrdData):
