@@ -15,10 +15,11 @@ from PyQt6.QtGui import QFont
 
 import json
 import copy
+from datetime import datetime
 from platformdirs import user_config_dir
 
 import grd_io
-from foot_model import FootModel, ArchParams, MetatarsalParams, preview_arch_max
+from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, preview_arch_max
 from heatmap_widget import HeatmapWidget
 
 
@@ -32,6 +33,7 @@ _DEFAULT_SETTINGS: dict = {
         "smoothing": 1.0,
         "front_offset": 0.0,
     },
+    "paths": {"original_dir": "", "edited_dir": ""},
 }
 
 
@@ -56,6 +58,56 @@ def _save_settings(values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(values, f, indent=2, ensure_ascii=False)
+
+
+def _validate_distinct_paths(original_dir: str, edited_dir: str) -> str | None:
+    """元データ保存先と編集後データ保存先が同一でないことを検証する（空欄は許容）。"""
+    if original_dir and edited_dir and Path(original_dir) == Path(edited_dir):
+        return (
+            "元データ保存先と編集後データ保存先には異なるフォルダを指定してください。\n"
+            "同じフォルダにすると、元データが編集後データで上書きされ失われます。"
+        )
+    return None
+
+
+def _validate_save_paths(original_dir: str, edited_dir: str) -> str | None:
+    """保存実行前の検証。問題があればエラーメッセージ、なければNoneを返す。"""
+    if not original_dir or not edited_dir:
+        return "元データ保存先・編集後データ保存先の両方を設定してください。"
+    return _validate_distinct_paths(original_dir, edited_dir)
+
+
+def _build_archive_filename(
+    original_filename: str, existing_names: set[str], timestamp: str
+) -> str:
+    """タイムスタンプ付き履歴ファイル名を生成する。
+
+    元データ・編集後データの両フォルダで同名衝突が起きないよう、
+    呼び出し側が集めた既存ファイル名の集合を受け取って判定する
+    （ファイルシステムへは一切アクセスしない純粋関数）。
+    """
+    stem = Path(original_filename).stem
+    suffix = Path(original_filename).suffix
+    candidate = f"{timestamp}_{original_filename}"
+    counter = 1
+    while candidate in existing_names:
+        candidate = f"{timestamp}_{stem}_{counter:03d}{suffix}"
+        counter += 1
+    return candidate
+
+
+def _layer_to_json_dict(layer: LayerRecord) -> dict:
+    """LayerRecordをJSON化可能な辞書に変換する（np.ndarrayはlistへ変換）。"""
+    params = {
+        key: (value.tolist() if isinstance(value, np.ndarray) else value)
+        for key, value in layer.params.items()
+    }
+    return {
+        "name": layer.name,
+        "operation": layer.operation,
+        "params": params,
+        "enabled": layer.enabled,
+    }
 
 
 class SettingsDialog(QDialog):
@@ -131,15 +183,52 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(meta_box)
 
+        paths_box = QGroupBox("データ保存先")
+        paths_form = QFormLayout(paths_box)
+
+        self._original_dir_edit = QLineEdit(defaults.get("paths", {}).get("original_dir", ""))
+        self._original_dir_edit.setReadOnly(True)
+        btn_browse_original = QPushButton("参照...")
+        btn_browse_original.clicked.connect(lambda: self._browse_folder(self._original_dir_edit))
+        original_row = QHBoxLayout()
+        original_row.addWidget(self._original_dir_edit)
+        original_row.addWidget(btn_browse_original)
+        paths_form.addRow("元データ保存先:", original_row)
+
+        self._edited_dir_edit = QLineEdit(defaults.get("paths", {}).get("edited_dir", ""))
+        self._edited_dir_edit.setReadOnly(True)
+        btn_browse_edited = QPushButton("参照...")
+        btn_browse_edited.clicked.connect(lambda: self._browse_folder(self._edited_dir_edit))
+        edited_row = QHBoxLayout()
+        edited_row.addWidget(self._edited_dir_edit)
+        edited_row.addWidget(btn_browse_edited)
+        paths_form.addRow("編集後データ保存先:", edited_row)
+
+        layout.addWidget(paths_box)
+
         btn_row = QHBoxLayout()
         btn_save = QPushButton("保存して閉じる")
         btn_save.setDefault(True)
         btn_cancel = QPushButton("キャンセル")
-        btn_save.clicked.connect(self.accept)
+        btn_save.clicked.connect(self._on_save_clicked)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_save)
         btn_row.addWidget(btn_cancel)
         layout.addLayout(btn_row)
+
+    def _browse_folder(self, line_edit: QLineEdit) -> None:
+        start_dir = line_edit.text() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "フォルダを選択", start_dir)
+        if selected:
+            line_edit.setText(selected)
+
+    def _on_save_clicked(self) -> None:
+        paths = self.get_values()["paths"]
+        error = _validate_distinct_paths(paths["original_dir"], paths["edited_dir"])
+        if error:
+            QMessageBox.warning(self, "設定エラー", error)
+            return
+        self.accept()
 
     def get_values(self) -> dict:
         return {
@@ -155,6 +244,10 @@ class SettingsDialog(QDialog):
                 "smoothing": self._meta_smooth.value(),
                 "front_offset": self._meta_front_offset.value(),
             },
+            "paths": {
+                "original_dir": self._original_dir_edit.text(),
+                "edited_dir": self._edited_dir_edit.text(),
+            },
         }
 
 
@@ -164,6 +257,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("足底スキャンエディタ")
         self.setMinimumSize(1100, 800)
         self._model: FootModel | None = None
+        self._current_path: str | None = None
+        self._original_bytes: bytes | None = None
+        self._original_filename: str | None = None
         self._current_foot = "left"
         self._arch_params = ArchParams()
         self._meta_params = MetatarsalParams()
@@ -619,6 +715,11 @@ class MainWindow(QMainWindow):
             grd = grd_io.load(path)
             self._model = FootModel(grd)
             self._current_path = path
+            # 将来の自動修正機能のため、開いた時点の生バイト列を保持する。
+            # 上書き保存後は self._current_path のディスク上の内容が編集後データに
+            # 置き換わるため、再読込ではなくこのキャッシュを常に「元データ」として使う。
+            self._original_bytes = Path(path).read_bytes()
+            self._original_filename = Path(path).name
             self._refresh_heatmaps()
             self._load_patient_fields()
             self._update_status(f"読み込み完了: {Path(path).name}")
@@ -628,11 +729,66 @@ class MainWindow(QMainWindow):
     def _save_file(self):
         if not self._model:
             return
+        if not self._current_path or self._original_bytes is None or self._original_filename is None:
+            QMessageBox.critical(
+                self, "エラー", "元データの情報がありません。GRDファイルを開き直してください。"
+            )
+            return
+
+        paths_settings = self._defaults.get("paths", {})
+        original_dir = paths_settings.get("original_dir", "")
+        edited_dir = paths_settings.get("edited_dir", "")
+        error = _validate_save_paths(original_dir, edited_dir)
+        if error:
+            QMessageBox.warning(self, "保存先フォルダ未設定", f"{error}\n続けて設定画面を開きます。")
+            self._open_settings()
+            return
+
+        original_dir_path = Path(original_dir)
+        edited_dir_path = Path(edited_dir)
+
         try:
-            grd_io.save(self._model.grd, self._current_path)
-            self._update_status(f"保存完了: {Path(self._current_path).name}")
+            original_dir_path.mkdir(parents=True, exist_ok=True)
+            edited_dir_path.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            QMessageBox.critical(self, "エラー", f"保存失敗:\n{e}")
+            QMessageBox.critical(self, "エラー", f"保存先フォルダの作成に失敗しました:\n{e}")
+            return
+
+        existing_names = (
+            {p.name for p in original_dir_path.iterdir()}
+            | {p.name for p in edited_dir_path.iterdir()}
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_filename = _build_archive_filename(self._original_filename, existing_names, timestamp)
+
+        try:
+            # ① 元データ（開いた時点の生データ）をそのまま保存
+            (original_dir_path / archive_filename).write_bytes(self._original_bytes)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"元データの保存に失敗しました:\n{e}")
+            return
+
+        try:
+            # ② 編集後データを保存
+            grd_io.save(self._model.grd, str(edited_dir_path / archive_filename))
+            # ② 編集内容（編集履歴）を保存（学習データ用、外注先へ渡す③には含めない）
+            edit_history = {"layers": [_layer_to_json_dict(layer) for layer in self._model.layers]}
+            edit_json_path = edited_dir_path / f"{Path(archive_filename).stem}.edit.json"
+            edit_json_path.write_text(
+                json.dumps(edit_history, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"編集後データの保存に失敗しました:\n{e}")
+            return
+
+        try:
+            # ③ 選択した元ファイルパス自体を編集後データで上書き（外注先へ渡す想定、編集履歴は含めない）
+            grd_io.save(self._model.grd, self._current_path)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"上書き保存に失敗しました:\n{e}")
+            return
+
+        self._update_status(f"保存完了: {Path(self._current_path).name} (履歴: {archive_filename})")
 
     def _save_as_file(self):
         if not self._model:
