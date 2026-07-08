@@ -44,12 +44,15 @@ class PatientForm:
         return full or self.romaji or "（未入力）"
 
     def to_patient_info(self) -> grd_io.PatientInfo:
+        # 年齢はGRDファイルのメタデータには対応する保存先がないためアプリ内一時情報とし、
+        # grd_io.PatientInfo（ファイルへ保存される情報）には含めない。
         return grd_io.PatientInfo(
             name=self.romaji or self.display_name(),
             country="Japan",
-            age=self.age,
             gender=self.gender,
-            shoe_size_jp=self.shoe_size_cm,
+            shoe_size=self.shoe_size_cm,
+            foot_size_left=self.foot_size_left,
+            foot_size_right=self.foot_size_right,
         )
 
 
@@ -405,9 +408,11 @@ class MainWindow(QMainWindow):
             p = data.patient
             self._patient_form = PatientForm(
                 romaji=p.name,
-                age=p.age,
+                # 年齢はGRDファイルに保存されないため引き継げない（空のまま）
                 gender=p.gender or "男性",
-                shoe_size_cm=p.shoe_size_jp,
+                shoe_size_cm=p.shoe_size,
+                foot_size_left=p.foot_size_left,
+                foot_size_right=p.foot_size_right,
             )
             self._info_bar.update_patient(self._patient_form)
             # 保存済みファイルはキャリブなしでそのまま表示
@@ -528,11 +533,10 @@ class MainWindow(QMainWindow):
         meta: list[str] = [""] * 30
         meta[0] = f"_({pf.romaji or pf.display_name()})"
         meta[5] = "Japan"
-        meta[11] = pf.age
+        meta[11] = pf.shoe_size_cm
         meta[13] = pf.gender
-        meta[21] = pf.shoe_size_cm
-        meta[25] = pf.foot_size_left
-        meta[26] = pf.foot_size_right
+        meta[20] = pf.foot_size_left
+        meta[21] = pf.foot_size_right
         patient = pf.to_patient_info()
         grd_io.save(grd_io.GrdData(grid=s.calibrated_grid, patient=patient, raw_meta_lines=meta), path)
         self._current_session = MeasurementSession(

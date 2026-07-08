@@ -209,3 +209,21 @@ def test_undo_single_item_returns_none():
         np.zeros((64, 16)), np.zeros((64, 16)), grd_io.PatientInfo(), None
     ))
     assert stack.undo() is None
+
+
+# ─────────────────────── PatientForm.to_patient_info ───────────────────────
+# (行11=靴サイズ、行20=左足サイズ、行21=右足サイズが実際の意味。
+#  年齢はGRDファイルには保存しないアプリ内一時情報のため grd_io.PatientInfo には含めない)
+
+def test_to_patient_info_maps_shoe_size():
+    from measure.main import PatientForm
+    form = PatientForm(shoe_size_cm="25")
+    assert form.to_patient_info().shoe_size == "25"
+
+
+def test_to_patient_info_maps_foot_sizes():
+    from measure.main import PatientForm
+    form = PatientForm(foot_size_left="38.5", foot_size_right="39")
+    p = form.to_patient_info()
+    assert p.foot_size_left == "38.5"
+    assert p.foot_size_right == "39"

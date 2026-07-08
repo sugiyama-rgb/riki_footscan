@@ -15,12 +15,12 @@ LEFT_ROWS = slice(32, 64)   # 行33-64 → 左足
 class PatientInfo:
     name: str = ""
     country: str = ""
-    age: str = ""
+    shoe_size: str = ""       # 登録シューズサイズ（行11）
     gender_code: str = ""
     gender: str = ""
     device_id: str = ""
-    shoe_size_eur: str = ""
-    shoe_size_jp: str = ""
+    foot_size_left: str = ""  # 左足サイズ（行20）
+    foot_size_right: str = "" # 右足サイズ（行21）
     color_code: str = ""
     set_count: str = ""
     software_version: str = ""
@@ -72,12 +72,12 @@ def _parse_meta(lines: list[str]) -> PatientInfo:
         else:
             p.name = first
         p.country = get(5)
-        p.age = get(11)
+        p.shoe_size = get(11)
         p.gender_code = get(12)
         p.gender = get(13)
         p.device_id = get(17)
-        p.shoe_size_eur = get(20)
-        p.shoe_size_jp = get(21)
+        p.foot_size_left = get(20)
+        p.foot_size_right = get(21)
         p.color_code = get(22)
         p.set_count = get(24)
         p.software_version = get(28)

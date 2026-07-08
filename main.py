@@ -35,6 +35,7 @@ _DEFAULT_SETTINGS: dict = {
         "front_offset": 0.0,
     },
     "paths": {"original_dir": "", "edited_dir": ""},
+    "last_open_dir": "",
 }
 
 
@@ -47,8 +48,12 @@ def _load_settings() -> dict:
             data = json.load(f)
         result = copy.deepcopy(_DEFAULT_SETTINGS)
         for section, values in data.items():
-            if section in result and isinstance(values, dict):
+            if section not in result:
+                continue
+            if isinstance(values, dict):
                 result[section].update(values)
+            else:
+                result[section] = values
         return result
     except Exception:
         return copy.deepcopy(_DEFAULT_SETTINGS)
@@ -770,17 +775,17 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
 
         self._pt_name = QLineEdit()
-        self._pt_age = QLineEdit()
+        self._pt_shoe_size = QLineEdit()
         self._pt_gender = QComboBox()
         self._pt_gender.addItems(["Male", "Female"])
-        self._pt_shoe_eur = QLineEdit()
-        self._pt_shoe_jp = QLineEdit()
+        self._pt_foot_left = QLineEdit()
+        self._pt_foot_right = QLineEdit()
 
         layout.addRow("氏名:", self._pt_name)
-        layout.addRow("年齢:", self._pt_age)
+        layout.addRow("靴サイズ:", self._pt_shoe_size)
         layout.addRow("性別:", self._pt_gender)
-        layout.addRow("サイズ (EUR):", self._pt_shoe_eur)
-        layout.addRow("サイズ (JP cm):", self._pt_shoe_jp)
+        layout.addRow("左足サイズ:", self._pt_foot_left)
+        layout.addRow("右足サイズ:", self._pt_foot_right)
 
         btn_save_pt = QPushButton("患者情報を保存")
         btn_save_pt.clicked.connect(self._save_patient_info)
@@ -792,11 +797,14 @@ class MainWindow(QMainWindow):
     # ファイル操作
     # ──────────────────────────────────────────
     def _open_file(self):
+        start_dir = self._defaults.get("last_open_dir", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "GRDファイルを開く", "", "GRD Files (*.grd);;All Files (*)"
+            self, "GRDファイルを開く", start_dir, "GRD Files (*.grd);;All Files (*)"
         )
         if not path:
             return
+        self._defaults["last_open_dir"] = str(Path(path).parent)
+        _save_settings(self._defaults)
         try:
             grd = grd_io.load(path)
             self._model = FootModel(grd)
@@ -1300,21 +1308,21 @@ class MainWindow(QMainWindow):
             return
         p = self._model.grd.patient
         self._pt_name.setText(p.name)
-        self._pt_age.setText(p.age)
+        self._pt_shoe_size.setText(p.shoe_size)
         idx = 1 if p.gender.lower() == "female" else 0
         self._pt_gender.setCurrentIndex(idx)
-        self._pt_shoe_eur.setText(p.shoe_size_eur)
-        self._pt_shoe_jp.setText(p.shoe_size_jp)
+        self._pt_foot_left.setText(p.foot_size_left)
+        self._pt_foot_right.setText(p.foot_size_right)
 
     def _save_patient_info(self):
         if not self._model:
             return
         p = self._model.grd.patient
         p.name = self._pt_name.text()
-        p.age = self._pt_age.text()
+        p.shoe_size = self._pt_shoe_size.text()
         p.gender = self._pt_gender.currentText()
-        p.shoe_size_eur = self._pt_shoe_eur.text()
-        p.shoe_size_jp = self._pt_shoe_jp.text()
+        p.foot_size_left = self._pt_foot_left.text()
+        p.foot_size_right = self._pt_foot_right.text()
         # raw_meta_linesを更新
         _update_raw_meta(self._model.grd)
         self._update_status("患者情報を更新しました")
@@ -1646,12 +1654,12 @@ def _update_raw_meta(grd: grd_io.GrdData):
 
     set_line(0, f"_({p.name})")
     set_line(5, p.country)
-    set_line(11, p.age)
+    set_line(11, p.shoe_size)
     set_line(12, p.gender_code)
     set_line(13, p.gender)
     set_line(17, p.device_id)
-    set_line(20, p.shoe_size_eur)
-    set_line(21, p.shoe_size_jp)
+    set_line(20, p.foot_size_left)
+    set_line(21, p.foot_size_right)
 
 
 if __name__ == "__main__":

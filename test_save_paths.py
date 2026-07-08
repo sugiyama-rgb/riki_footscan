@@ -1,14 +1,18 @@
 """3方向保存（元データ/編集後データ/編集履歴）のための純粋関数のユニットテスト（TDD: RED → GREEN）"""
+import json
 import numpy as np
 
+import main
 from main import (
     _build_archive_filename,
     _layer_to_json_dict,
     _validate_save_paths,
     _validate_distinct_paths,
     _reset_marks_dirty,
+    _update_raw_meta,
 )
 from foot_model import LayerRecord
+import grd_io
 
 
 # ─────────────────────── _validate_distinct_paths ───────────────────────
@@ -133,3 +137,44 @@ def test_reset_marks_dirty_when_layers_existed():
 
 def test_reset_does_not_mark_dirty_when_no_layers_existed():
     assert _reset_marks_dirty(had_layers=False) is False
+
+
+# ─────────────────────── _update_raw_meta（患者情報の書き戻し） ───────────────────────
+# (行11=靴サイズ、行20=左足サイズ、行21=右足サイズが実際の意味。旧実装は行11を年齢として誤解釈していた)
+
+def test_update_raw_meta_writes_shoe_size_to_line11():
+    grd = grd_io.GrdData(
+        grid=np.zeros((64, 16)),
+        patient=grd_io.PatientInfo(shoe_size="25"),
+        raw_meta_lines=[],
+    )
+    _update_raw_meta(grd)
+    assert grd.raw_meta_lines[11] == "25"
+
+
+def test_update_raw_meta_writes_foot_sizes_to_line20_and_21():
+    grd = grd_io.GrdData(
+        grid=np.zeros((64, 16)),
+        patient=grd_io.PatientInfo(foot_size_left="38.5", foot_size_right="39"),
+        raw_meta_lines=[],
+    )
+    _update_raw_meta(grd)
+    assert grd.raw_meta_lines[20] == "38.5"
+    assert grd.raw_meta_lines[21] == "39"
+
+
+# ─────────────────────── 前回開いたフォルダの記憶（last_open_dir） ───────────────────────
+
+def test_load_settings_defaults_last_open_dir_to_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "user_config_dir", lambda name: str(tmp_path))
+    result = main._load_settings()
+    assert result["last_open_dir"] == ""
+
+
+def test_load_settings_reads_saved_last_open_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "user_config_dir", lambda name: str(tmp_path))
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"last_open_dir": "C:/some/folder"}), encoding="utf-8"
+    )
+    result = main._load_settings()
+    assert result["last_open_dir"] == "C:/some/folder"
