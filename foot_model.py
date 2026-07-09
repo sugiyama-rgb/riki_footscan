@@ -24,8 +24,11 @@ class MetatarsalParams:
 class ArchParams:
     # 選択済みマスク (32×16 の bool配列)
     mask: Optional[np.ndarray] = None
-    height_mm: float = 5.0    # 浅くする量 (mm)
+    height_mm: float = 5.0    # 浅くする量。正=持ち上げる、負=へこませる（免荷） (mm)
     smoothing: float = 1.5    # ぼかし半径 (グリッド単位)
+
+
+ARCH_MAX_LOWER_MM = 10.0  # へこませる方向: ベーススキャン値からの最大掘り込み量 (mm)
 
 
 @dataclass
@@ -72,7 +75,7 @@ class FootModel:
         grid = self._base_grid.copy()
         for layer in self._layers:
             if layer.enabled:
-                grid = _apply_operation(grid, layer.operation, layer.params)
+                grid = _apply_operation(grid, layer.operation, layer.params, base_grid=self._base_grid)
         self._grd.grid = grid
 
     def _add_layer(self, layer: LayerRecord) -> None:
@@ -224,8 +227,9 @@ class FootModel:
         sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
         prev = self._grd.grid[sl].copy()
         foot_label = "左足" if foot == "left" else "右足"
+        direction_label = "持ち上げ" if params.height_mm >= 0 else "免荷"
         self._add_layer(LayerRecord(
-            name=f"アーチ調整 {foot_label} {params.height_mm:.1f}mm",
+            name=f"アーチ調整 {foot_label} {direction_label} {abs(params.height_mm):.1f}mm",
             operation="arch",
             params={
                 "foot": foot,
@@ -235,10 +239,11 @@ class FootModel:
             },
         ))
         diff = self._grd.grid[sl] - prev
+        actual_extreme = float(np.max(diff)) if params.height_mm >= 0 else float(np.min(diff))
         return {
             "set_mm": params.height_mm,
-            "actual_max": float(np.max(diff)),
-            "affected": int(np.sum(diff > 0.05)),
+            "actual_max": actual_extreme,
+            "affected": int(np.sum(np.abs(diff) > 0.05)),
         }
 
     # ──────────────────────────────────────────
@@ -274,7 +279,7 @@ class FootModel:
 # ──────────────────────────────────────────────
 # レイヤー適用エンジン
 # ──────────────────────────────────────────────
-def _apply_operation(grid: np.ndarray, operation: str, params: dict) -> np.ndarray:
+def _apply_operation(grid: np.ndarray, operation: str, params: dict, base_grid: np.ndarray | None = None) -> np.ndarray:
     result = grid.copy()
 
     if operation == "noise_removal":
@@ -351,7 +356,12 @@ def _apply_operation(grid: np.ndarray, operation: str, params: dict) -> np.ndarr
         smooth_mask = np.clip(smooth_mask, 0, 1)
         delta = smooth_mask * params["height_mm"]
         block = result[sl].copy()
-        result[sl] = np.minimum(block + delta, 0.0)
+        raised = block + delta
+        if base_grid is not None:
+            floor = base_grid[sl] - ARCH_MAX_LOWER_MM
+            result[sl] = np.clip(raised, floor, 0.0)
+        else:
+            result[sl] = np.minimum(raised, 0.0)
 
     elif operation == "metatarsal":
         foot = params["foot"]

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QPushButton, QLabel, QSlider, QSpinBox, QDoubleSpinBox,
     QFileDialog, QMessageBox, QTabWidget, QScrollArea, QLineEdit,
     QComboBox, QCheckBox, QSplitter, QStatusBar, QFormLayout,
-    QListWidget, QListWidgetItem, QDialog,
+    QListWidget, QListWidgetItem, QDialog, QRadioButton, QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -614,8 +614,22 @@ class MainWindow(QMainWindow):
         btn_clear_sel.clicked.connect(self._clear_arch_selection)
         layout.addWidget(btn_clear_sel)
 
+        # 方向トグル（持ち上げる／へこませる＝免荷）
+        layout.addWidget(QLabel("② 方向を選択してください:"))
+        dir_row = QHBoxLayout()
+        self._arch_raise_radio = QRadioButton("持ち上げる（アーチ）")
+        self._arch_lower_radio = QRadioButton("へこませる（免荷）")
+        self._arch_raise_radio.setChecked(True)
+        self._arch_direction_group = QButtonGroup(w)
+        self._arch_direction_group.addButton(self._arch_raise_radio)
+        self._arch_direction_group.addButton(self._arch_lower_radio)
+        self._arch_raise_radio.toggled.connect(lambda _: self._update_arch_preview_label())
+        dir_row.addWidget(self._arch_raise_radio)
+        dir_row.addWidget(self._arch_lower_radio)
+        layout.addLayout(dir_row)
+
         # 高さスライダー（内部値×2: range 2〜40 = 1.0〜20.0mm）
-        layout.addWidget(QLabel("② 調整量 (0.5〜20 mm):"))
+        layout.addWidget(QLabel("③ 調整量 (0.5〜20 mm):"))
         row = QHBoxLayout()
         self._arch_slider = QSlider(Qt.Orientation.Horizontal)
         self._arch_slider.setRange(2, 40)
@@ -641,7 +655,7 @@ class MainWindow(QMainWindow):
         self._arch_smooth.valueChanged.connect(lambda _: self._update_arch_preview_label())
         layout.addWidget(self._arch_smooth)
 
-        btn_apply = QPushButton("③ アーチ調整を適用")
+        btn_apply = QPushButton("④ アーチ調整を適用")
         btn_apply.clicked.connect(self._apply_arch)
         layout.addWidget(btn_apply)
 
@@ -1111,6 +1125,10 @@ class MainWindow(QMainWindow):
         self._arch_params.height_mm = val / 2.0
         self._update_arch_preview_label()
 
+    def _arch_signed_height_mm(self) -> float:
+        magnitude = self._arch_slider.value() / 2.0
+        return magnitude if self._arch_raise_radio.isChecked() else -magnitude
+
     def _on_selection_changed(self, foot: str, mask: np.ndarray):
         if self._erase_select_mode:
             pass  # erase適用時にget_selection_maskで取得するため保持不要
@@ -1128,12 +1146,15 @@ class MainWindow(QMainWindow):
         if mask is None or not mask.any():
             self._arch_preview_label.setText("")
             return
-        actual = preview_arch_max(mask, self._arch_slider.value() / 2.0, self._arch_smooth.value())
-        self._arch_preview_label.setText(f"プレビュー最大: {actual:.1f}mm")
+        signed_mm = self._arch_signed_height_mm()
+        actual = preview_arch_max(mask, signed_mm, self._arch_smooth.value())
+        direction_label = "持ち上げ" if signed_mm >= 0 else "免荷（へこみ）"
+        self._arch_preview_label.setText(f"プレビュー{direction_label}: {abs(actual):.1f}mm")
 
     def _reset_arch_params(self):
         self._arch_slider.setValue(int(self._defaults["arch"]["height_mm"] * 2))
         self._arch_smooth.setValue(self._defaults["arch"]["smoothing"])
+        self._arch_raise_radio.setChecked(True)
 
     def _reset_meta_params(self):
         self._meta_height.setValue(self._defaults["metatarsal"]["height_mm"])
@@ -1162,7 +1183,7 @@ class MainWindow(QMainWindow):
             return
         params = ArchParams(
             mask=mask,
-            height_mm=self._arch_slider.value() / 2.0,
+            height_mm=self._arch_signed_height_mm(),
             smoothing=self._arch_smooth.value(),
         )
         stats = self._model.apply_arch(foot, params)
@@ -1179,13 +1200,15 @@ class MainWindow(QMainWindow):
             )
             self._model.apply_arch(other_foot, mirror_params)
         self._refresh_heatmaps()
+        direction_label = "持ち上げ" if params.height_mm >= 0 else "免荷"
         if self._arch_mirror_check.isChecked():
-            self._update_status(f"アーチ調整を両足に適用 ({params.height_mm:.1f}mm)")
+            self._update_status(f"アーチ調整（{direction_label}）を両足に適用 ({abs(params.height_mm):.1f}mm)")
         else:
-            self._update_status(f"アーチ調整を適用 ({foot}, {params.height_mm:.1f}mm)")
+            self._update_status(f"アーチ調整（{direction_label}）を適用 ({foot}, {abs(params.height_mm):.1f}mm)")
         if stats:
             self._arch_stats_label.setText(
-                f"設定: {stats['set_mm']:.1f}mm ／ 実測最大: {stats['actual_max']:.1f}mm ／ 影響: {stats['affected']}セル"
+                f"設定: {direction_label} {abs(stats['set_mm']):.1f}mm ／ "
+                f"実測最大: {abs(stats['actual_max']):.1f}mm ／ 影響: {stats['affected']}セル"
             )
 
     # ──────────────────────────────────────────
