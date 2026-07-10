@@ -22,6 +22,7 @@ import grd_io
 from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, preview_arch_max
 from heatmap_widget import HeatmapWidget
 from toast_widget import ToastWidget
+from version import VERSION
 
 
 _DEFAULT_SETTINGS: dict = {
@@ -372,7 +373,7 @@ class SettingsDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("足底スキャンエディタ")
+        self.setWindowTitle(f"足底スキャンエディタ v{VERSION}")
         self.setMinimumSize(1100, 800)
         self._model: FootModel | None = None
         self._current_path: str | None = None
