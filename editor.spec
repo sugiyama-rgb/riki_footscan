@@ -4,7 +4,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('アイコン.ico', '.')],
     hiddenimports=[
         'mpl_toolkits.mplot3d',
         'matplotlib.backends.backend_qtagg',

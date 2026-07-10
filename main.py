@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QDialog, QRadioButton, QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 import json
 import copy
@@ -23,6 +23,12 @@ from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, pre
 from heatmap_widget import HeatmapWidget
 from toast_widget import ToastWidget
 from version import VERSION
+
+
+def _resource_path(name: str) -> str:
+    """開発時・PyInstaller onefile実行時の両方でリソースファイルの絶対パスを返す"""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return str(base / name)
 
 
 _DEFAULT_SETTINGS: dict = {
@@ -1792,6 +1798,7 @@ def _update_raw_meta(grd: grd_io.GrdData):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(_resource_path("アイコン.ico")))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
