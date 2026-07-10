@@ -133,6 +133,101 @@ def _layer_to_json_dict(layer: LayerRecord) -> dict:
     }
 
 
+# 3D表示の視点定義: (ラベル, elev, azim, flip_x, flip_y_left, flip_y_right)
+# flip_x: 後方視点でX軸（足幅方向）が自然に反転するため補正
+# flip_y_left/flip_y_right: 矢状面は左右足で内側/外側が解剖学的に鏡像なため
+#         足ごとにY軸反転有無を分ける
+_ViewSpec = tuple[str, int, int, bool, bool, bool]
+
+_VIEW_GROUPS: list[tuple[str, list[_ViewSpec]]] = [
+    ("前額面", [
+        ("前方", 0, -90, False, False, False),
+        ("後方", 0, 90, True, False, False),
+    ]),
+    ("矢状面", [
+        ("内側", 0, -145, False, True, False),
+        ("外側", 0, -35, False, False, True),
+    ]),
+    ("水平面", [
+        ("上側", 90, -90, False, False, False),
+        ("下側", -80, -90, False, False, False),
+    ]),
+]
+
+# 画面分割モードで表示する行順（1行目=後面, 2行目=内側面, 3行目=外側面）
+_SPLIT_VIEW_LABELS: list[str] = ["後方", "内側", "外側"]
+
+# 画面分割モードのタイトル表示用（_lookup_view のラベルと表示名を分ける）
+_SPLIT_VIEW_DISPLAY: dict[str, str] = {"後方": "後面", "内側": "内側面", "外側": "外側面"}
+
+# 画面分割モードの各セルはmatplotlibの仕様上ほぼ正方形に制約されるため、
+# 通常モードと同じ実比率のbox_aspect（3軸のスケールは変えない）のまま
+# カメラズームのみ引き上げ、画面をある程度大きく使えるようにする
+_SPLIT_ZOOM = 2.0
+
+
+def _lookup_view(label: str) -> _ViewSpec:
+    """_VIEW_GROUPS からラベル名で視点定義を検索する。"""
+    for _, views in _VIEW_GROUPS:
+        for v in views:
+            if v[0] == label:
+                return v
+    raise KeyError(f"未定義の視点ラベル: {label}")
+
+
+def _render_foot_surface(
+    ax,
+    grid: np.ndarray,
+    base_grid: np.ndarray,
+    diff_enabled: bool,
+    old_wireframe=None,
+    old_base_wireframe=None,
+):
+    """指定Axes3DにX,Y,Zサーフェス/ワイヤーフレームを描画する。
+    old_wireframe/old_base_wireframeが渡された場合は先に取り除いてから再描画する。
+    戻り値: (wireframe_artist, base_artist_or_None)
+    """
+    if old_wireframe is not None:
+        try:
+            old_wireframe.remove()
+        except (ValueError, AttributeError):
+            pass
+    if old_base_wireframe is not None:
+        try:
+            old_base_wireframe.remove()
+        except (ValueError, AttributeError):
+            pass
+
+    rows, cols = grid.shape
+    X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
+    Z = np.flipud(grid) / 10
+
+    base_artist = None
+    if diff_enabled:
+        import matplotlib.cm
+        import matplotlib.colors
+
+        Z_base = np.flipud(base_grid) / 10
+        base_artist = ax.plot_surface(
+            X, Y, Z_base, color='#666666',
+            rstride=1, cstride=1, alpha=1.0, edgecolor='none',
+        )
+        Z_diff = Z - Z_base
+        vmax = max(float(np.max(Z_diff)), 0.1)
+        norm = matplotlib.colors.Normalize(vmin=0, vmax=vmax)
+        face_colors = matplotlib.cm.plasma(norm(Z_diff))
+        wireframe = ax.plot_surface(
+            X, Y, Z, facecolors=face_colors,
+            rstride=1, cstride=1, alpha=0.95, edgecolor='none',
+        )
+    else:
+        wireframe = ax.plot_wireframe(
+            X, Y, Z, color='#2266ee', linewidth=0.5,
+            rstride=1, cstride=1, alpha=0.9,
+        )
+    return wireframe, base_artist
+
+
 class SettingsDialog(QDialog):
     def __init__(self, defaults: dict, parent=None):
         super().__init__(parent)
@@ -292,9 +387,12 @@ class MainWindow(QMainWindow):
         self._3d_dialog = None
         self._3d_canvas = None
         self._3d_axes: list = []
+        self._3d_axis_feet: list = []
         self._3d_wireframes: list = []
+        self._3d_base_wireframes: list = []
         self._3d_x_flip: list = [False, False]
         self._3d_y_flip: list = [False, False]
+        self._3d_split_mode: bool = False
 
         self._defaults = _load_settings()
         self._build_ui()
@@ -1353,6 +1451,76 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────
     # 3D表示
     # ──────────────────────────────────────────
+    def _build_3d_axes(self, fig, split_mode: bool) -> None:
+        """figに通常モード(1x2)または画面分割モード(3x2)のAxes3Dを構築し、
+        self._3d_axes / self._3d_axis_feet / self._3d_wireframes /
+        self._3d_base_wireframes を再構築する。呼び出し前にfigはクリア済みであること。
+        """
+        if not self._model:
+            raise ValueError("_build_3d_axes はモデル読み込み後にのみ呼び出せる")
+
+        feet = [
+            (0, self._model.left_grid, self._model.base_left_grid, "左足"),
+            (1, self._model.right_grid, self._model.base_right_grid, "右足"),
+        ]
+        diff_enabled = self._btn_diff.isChecked()
+
+        self._3d_axes = []
+        self._3d_axis_feet = []
+        self._3d_wireframes = []
+        self._3d_base_wireframes = []
+
+        if not split_mode:
+            for foot_idx, grid, base_grid, label in feet:
+                ax = fig.add_subplot(1, 2, foot_idx + 1, projection='3d')
+                ax.set_facecolor('black')
+                wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
+                rows, cols = grid.shape
+                ax.set_title(label, fontsize=12, color='white', pad=-15)
+                ax.set_box_aspect([cols, rows, 2])
+                ax.view_init(elev=25, azim=-55)
+                ax.set_axis_off()
+                self._3d_axes.append(ax)
+                self._3d_axis_feet.append(foot_idx)
+                self._3d_wireframes.append(wf)
+                self._3d_base_wireframes.append(bwf)
+            self._3d_x_flip = [False, False]
+            self._3d_y_flip = [False, False]
+        else:
+            # 3行(方向)×2列(足)
+            for row, view_label in enumerate(_SPLIT_VIEW_LABELS):
+                _, elev, azim, flip_x, flip_y_left, flip_y_right = _lookup_view(view_label)
+                display_label = _SPLIT_VIEW_DISPLAY[view_label]
+                for foot_idx, grid, base_grid, label in feet:
+                    subplot_index = row * 2 + foot_idx + 1
+                    ax = fig.add_subplot(3, 2, subplot_index, projection='3d')
+                    ax.set_facecolor('black')
+                    wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
+                    rows, cols = grid.shape
+                    ax.set_title(f"{label} {display_label}", fontsize=10, color='white', pad=-10)
+                    # 3軸の相対スケールは通常モードと同じ実比率のまま、
+                    # zoomのみでカメラを寄せて画面をある程度大きく使う
+                    ax.set_box_aspect([cols, rows, 2], zoom=_SPLIT_ZOOM)
+                    ax.view_init(elev=elev, azim=azim)
+                    if flip_x:
+                        ax.invert_xaxis()
+                    fy = flip_y_right if foot_idx == 1 else flip_y_left
+                    if fy:
+                        ax.invert_yaxis()
+                    ax.set_axis_off()
+                    # ドラッグ回転は有効のままにし、プリセット視点からの微調整を都度行えるようにする
+                    self._3d_axes.append(ax)
+                    self._3d_axis_feet.append(foot_idx)
+                    self._3d_wireframes.append(wf)
+                    self._3d_base_wireframes.append(bwf)
+            # 分割モードの各Axesは視点固定でこのフラグを使わないが、
+            # self._3d_axes と長さを揃えておかないと、通常モード専用の
+            # 視点切替ボタンが誤って呼ばれた際にIndexErrorでクラッシュする
+            self._3d_x_flip = [False] * len(self._3d_axes)
+            self._3d_y_flip = [False] * len(self._3d_axes)
+
+        fig.tight_layout()
+
     def _show_3d_view(self):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
@@ -1380,100 +1548,42 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 8)
         layout.setSpacing(4)
 
-        fig = Figure(figsize=(13, 7), facecolor='black')
-        fig.suptitle("足底3D表示", fontsize=13, color='white')
-        canvas = FigureCanvas(fig)
-        layout.addWidget(canvas)
-
-        feet = [
-            (self._model.left_grid, "左足"),
-            (self._model.right_grid, "右足"),
-        ]
-        self._3d_axes = []
-        self._3d_wireframes = []
-        self._3d_base_wireframes: list = [None, None]
-        base_grids = [self._model.base_left_grid, self._model.base_right_grid]
-        for i, (grid, label) in enumerate(feet):
-            ax = fig.add_subplot(1, 2, i + 1, projection='3d')
-            ax.set_facecolor('black')
-            rows, cols = grid.shape
-            X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
-            Z = np.flipud(grid) / 10
-
-            # 元データサーフェスを先に描画（差分表示ONのとき）
-            if self._btn_diff.isChecked():
-                Z_base = np.flipud(base_grids[i]) / 10
-                bwf = ax.plot_surface(X, Y, Z_base, color='#666666',
-                                      rstride=1, cstride=1, alpha=1.0, edgecolor='none')
-                self._3d_base_wireframes[i] = bwf
-
-            # 修正後データの描画（差分ON=カラーマップサーフェス / OFF=青ワイヤーフレーム）
-            if self._btn_diff.isChecked():
-                import matplotlib.colors, matplotlib.cm
-                Z_diff = Z - Z_base
-                vmax = max(float(np.max(Z_diff)), 0.1)
-                norm = matplotlib.colors.Normalize(vmin=0, vmax=vmax)
-                face_colors = matplotlib.cm.plasma(norm(Z_diff))
-                wf = ax.plot_surface(X, Y, Z, facecolors=face_colors,
-                                     rstride=1, cstride=1, alpha=0.95, edgecolor='none')
-            else:
-                wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
-                                       rstride=1, cstride=1, alpha=0.9)
-
-            ax.set_title(label, fontsize=12, color='white', pad=-15)
-            ax.set_box_aspect([cols, rows, 2])
-            ax.view_init(elev=25, azim=-55)
-            ax.set_axis_off()
-            self._3d_axes.append(ax)
-            self._3d_wireframes.append(wf)
-
-        self._3d_canvas = canvas
-        self._3d_x_flip = [False] * len(self._3d_axes)
-        self._3d_y_flip = [False] * len(self._3d_axes)
-
-        fig.tight_layout()
-        canvas.draw()
-
-        axes = self._3d_axes
-        # 軸反転状態のトラッキング（invert_xaxis/yaxisはトグルのため）
-        x_flip_state = self._3d_x_flip
-        y_flip_state = self._3d_y_flip
-
-        # 視点切替ボタン（PyQt6ネイティブ）
-        # タプル: (ラベル, elev, azim, flip_x, flip_y)
-        # flip_x: 後方視点でX軸（足幅方向）が自然に反転するため補正
-        # flip_y: 矢状面で内側(azim=-145)から見るとY軸（つま先↔踵）が
-        #         外側(azim=-35)と逆になるため補正
-        # タプル: (ラベル, elev, azim, flip_x, flip_y_left, flip_y_right)
-        # 矢状面は左右足で内側/外側が解剖学的に鏡像なため flip_y を足ごとに分ける
-        view_groups = [
-            ("前額面", [
-                ("前方", 0, -90, False, False, False),
-                ("後方", 0, 90, True, False, False),
-            ]),
-            ("矢状面", [
-                ("内側", 0, -145, False, True, False),
-                ("外側", 0, -35, False, False, True),
-            ]),
-            ("水平面", [
-                ("上側", 90, -90, False, False, False),
-                ("下側", -80, -90, False, False, False),
-            ]),
-        ]
-
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(20, 0, 20, 0)
-        btn_row.addStretch()
-
         btn_style = (
             "QPushButton { background-color: #404040; color: white; "
             "border-radius: 4px; font-size: 12px; padding: 4px 16px; }"
             "QPushButton:hover { background-color: #2255aa; }"
             "QPushButton:pressed { background-color: #113388; }"
+            "QPushButton:checked { background-color: #1a6b3c; }"
         )
         lbl_style = "color: #aaaaaa; font-size: 10px; background: transparent;"
 
-        for group_name, views in view_groups:
+        # 画面分割モード切替ボタン
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(20, 4, 20, 0)
+        split_btn = QPushButton("画面分割モード")
+        split_btn.setCheckable(True)
+        split_btn.setFixedHeight(28)
+        split_btn.setStyleSheet(btn_style)
+        top_row.addWidget(split_btn)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        fig = Figure(figsize=(13, 7), facecolor='black')
+        fig.suptitle("足底3D表示", fontsize=13, color='white')
+        canvas = FigureCanvas(fig)
+        layout.addWidget(canvas)
+
+        self._3d_split_mode = False
+        self._build_3d_axes(fig, split_mode=False)
+        self._3d_canvas = canvas
+        canvas.draw()
+
+        # 視点切替ボタン（通常モード専用、PyQt6ネイティブ）
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(20, 0, 20, 0)
+        btn_row.addStretch()
+
+        for group_name, views in _VIEW_GROUPS:
             group_col = QVBoxLayout()
             group_col.setSpacing(3)
 
@@ -1491,15 +1601,19 @@ class MainWindow(QMainWindow):
 
                 def make_cb(e, a, fx, fy_l, fy_r):
                     def cb():
-                        for i, ax in enumerate(axes):
+                        if self._3d_split_mode:
+                            # 視点切替ボタンは通常モード専用（分割モード中は非表示）。
+                            # 万一呼ばれても分割モードのAxesには影響させない。
+                            return
+                        for i, ax in enumerate(self._3d_axes):
                             ax.view_init(elev=e, azim=a)
-                            if x_flip_state[i] != fx:
+                            if self._3d_x_flip[i] != fx:
                                 ax.invert_xaxis()
-                                x_flip_state[i] = fx
+                                self._3d_x_flip[i] = fx
                             fy = fy_r if i == 1 else fy_l
-                            if y_flip_state[i] != fy:
+                            if self._3d_y_flip[i] != fy:
                                 ax.invert_yaxis()
-                                y_flip_state[i] = fy
+                                self._3d_y_flip[i] = fy
                         canvas.draw()
                     return cb
 
@@ -1510,13 +1624,28 @@ class MainWindow(QMainWindow):
             btn_row.addLayout(group_col)
             btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        view_btn_widget = QWidget()
+        view_btn_widget.setLayout(btn_row)
+        layout.addWidget(view_btn_widget)
+
+        def _on_split_toggled(checked: bool) -> None:
+            self._3d_split_mode = checked
+            fig.clf()
+            fig.suptitle("足底3D表示", fontsize=13, color='white')
+            self._build_3d_axes(fig, split_mode=checked)
+            canvas.draw()
+            view_btn_widget.setVisible(not checked)
+
+        split_btn.toggled.connect(_on_split_toggled)
 
         def _on_3d_closed():
             self._3d_dialog = None
             self._3d_canvas = None
             self._3d_axes = []
+            self._3d_axis_feet = []
             self._3d_wireframes = []
+            self._3d_base_wireframes = []
+            self._3d_split_mode = False
 
         dlg.finished.connect(_on_3d_closed)
         self._3d_dialog = dlg
@@ -1595,50 +1724,24 @@ class MainWindow(QMainWindow):
     def _refresh_3d(self):
         if not self._3d_canvas or not self._3d_axes or not self._model:
             return
-        feet = [
-            (self._model.left_grid, "左足"),
-            (self._model.right_grid, "右足"),
-        ]
-        for i, (ax, (grid, _label)) in enumerate(zip(self._3d_axes, feet)):
-            # 視点・軸範囲を保存
+        grids = {
+            0: (self._model.left_grid, self._model.base_left_grid),
+            1: (self._model.right_grid, self._model.base_right_grid),
+        }
+        diff_enabled = self._btn_diff.isChecked()
+        for i, ax in enumerate(self._3d_axes):
+            # 視点・軸範囲を保存（固定視点のAxesでも復元することで一貫した動作にする）
             elev, azim = ax.elev, ax.azim
             xlim = ax.get_xlim3d()
             ylim = ax.get_ylim3d()
             zlim = ax.get_zlim3d()
-            rows, cols = grid.shape
-            X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
-            Z = np.flipud(grid) / 10
-            # 元データサーフェスを先に削除→再描画（差分表示ONのとき）
-            bwf = self._3d_base_wireframes[i] if i < len(self._3d_base_wireframes) else None
-            if bwf is not None:
-                try:
-                    bwf.remove()
-                except (ValueError, AttributeError):
-                    pass
-                self._3d_base_wireframes[i] = None
-            if hasattr(self, '_btn_diff') and self._btn_diff.isChecked():
-                base_grids = [self._model.base_left_grid, self._model.base_right_grid]
-                Z_base = np.flipud(base_grids[i]) / 10
-                bwf = ax.plot_surface(X, Y, Z_base, color='#666666',
-                                      rstride=1, cstride=1, alpha=1.0, edgecolor='none')
-                self._3d_base_wireframes[i] = bwf
-            # 修正後データの差し替え（差分ON=カラーマップサーフェス / OFF=青ワイヤーフレーム）
-            try:
-                self._3d_wireframes[i].remove()
-            except (ValueError, IndexError):
-                pass
-            if hasattr(self, '_btn_diff') and self._btn_diff.isChecked():
-                import matplotlib.colors, matplotlib.cm
-                Z_diff = Z - Z_base
-                vmax = max(float(np.max(Z_diff)), 0.1)
-                norm = matplotlib.colors.Normalize(vmin=0, vmax=vmax)
-                face_colors = matplotlib.cm.plasma(norm(Z_diff))
-                wf = ax.plot_surface(X, Y, Z, facecolors=face_colors,
-                                     rstride=1, cstride=1, alpha=0.95, edgecolor='none')
-            else:
-                wf = ax.plot_wireframe(X, Y, Z, color='#2266ee', linewidth=0.5,
-                                       rstride=1, cstride=1, alpha=0.9)
+            foot_idx = self._3d_axis_feet[i]
+            grid, base_grid = grids[foot_idx]
+            old_wf = self._3d_wireframes[i] if i < len(self._3d_wireframes) else None
+            old_bwf = self._3d_base_wireframes[i] if i < len(self._3d_base_wireframes) else None
+            wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled, old_wf, old_bwf)
             self._3d_wireframes[i] = wf
+            self._3d_base_wireframes[i] = bwf
             # autoscalingで変化した軸範囲・視点を復元
             ax.set_xlim3d(xlim)
             ax.set_ylim3d(ylim)
