@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QPushButton, QLabel, QSlider, QSpinBox, QDoubleSpinBox,
     QFileDialog, QMessageBox, QTabWidget, QScrollArea, QLineEdit,
     QComboBox, QCheckBox, QSplitter, QStatusBar, QFormLayout,
-    QListWidget, QListWidgetItem, QDialog, QRadioButton, QButtonGroup,
+    QListWidget, QListWidgetItem, QDialog, QRadioButton, QButtonGroup, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon
@@ -138,7 +138,13 @@ def _layer_to_json_dict(layer: LayerRecord) -> dict:
         "operation": layer.operation,
         "params": params,
         "enabled": layer.enabled,
+        "locked": layer.locked,
     }
+
+
+def _layer_list_label(layer: LayerRecord) -> str:
+    """レイヤーリスト表示用のラベルを返す（固定中は先頭に🔒を付与）。"""
+    return f"\U0001F512 {layer.name}" if layer.locked else layer.name
 
 
 # 3D表示の視点定義: (ラベル, elev, azim, flip_x, flip_y_left, flip_y_right)
@@ -527,6 +533,8 @@ class MainWindow(QMainWindow):
         self._layer_list.setMaximumHeight(110)
         self._layer_list.setStyleSheet("QListWidget { font-size: 11px; }")
         self._layer_list.itemChanged.connect(self._on_layer_item_changed)
+        self._layer_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._layer_list.customContextMenuRequested.connect(self._on_layer_context_menu)
         layer_layout.addWidget(self._layer_list)
         tool_layout.addWidget(layer_box)
 
@@ -1474,8 +1482,8 @@ class MainWindow(QMainWindow):
             raise ValueError("_build_3d_axes はモデル読み込み後にのみ呼び出せる")
 
         feet = [
-            (0, self._model.left_grid, self._model.base_left_grid, "左足"),
-            (1, self._model.right_grid, self._model.base_right_grid, "右足"),
+            (0, self._model.left_grid, self._model.locked_left_grid, "左足"),
+            (1, self._model.right_grid, self._model.locked_right_grid, "右足"),
         ]
         diff_enabled = self._btn_diff.isChecked()
 
@@ -1685,7 +1693,7 @@ class MainWindow(QMainWindow):
         self._layer_list.blockSignals(True)
         self._layer_list.clear()
         for i, layer in enumerate(self._model.layers):
-            item = QListWidgetItem(layer.name)
+            item = QListWidgetItem(_layer_list_label(layer))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked if layer.enabled else Qt.CheckState.Unchecked
@@ -1711,6 +1719,26 @@ class MainWindow(QMainWindow):
             state = "有効" if enabled else "無効"
             self._update_status(f"レイヤー {state}: {name}")
 
+    def _on_layer_context_menu(self, pos) -> None:
+        if not self._model:
+            return
+        item = self._layer_list.itemAt(pos)
+        if item is None:
+            return
+        i = item.data(Qt.ItemDataRole.UserRole)
+        layer = self._model.layers[i]
+        menu = QMenu(self._layer_list)
+        action = menu.addAction("固定を解除" if layer.locked else "固定にする")
+        chosen = menu.exec(self._layer_list.mapToGlobal(pos))
+        if chosen is action:
+            name = layer.name
+            state = "解除" if layer.locked else "設定"  # トグル前の値から先に文言を決める
+            self._model.toggle_layer_lock(i)
+            self._refresh_layer_list()
+            self._update_diff_overlay()
+            self._refresh_3d()
+            self._update_status(f"レイヤーの固定を{state}しました: {name}")
+
     def _on_toggle_all_layers(self, checked: bool) -> None:
         if not self._model:
             self._btn_toggle_all.setChecked(False)
@@ -1732,15 +1760,15 @@ class MainWindow(QMainWindow):
     def _update_diff_overlay(self) -> None:
         if not self._model or not self._btn_diff.isChecked():
             return
-        self._hm_left.set_diff_grid(self._model.left_grid - self._model.base_left_grid)
-        self._hm_right.set_diff_grid(self._model.right_grid - self._model.base_right_grid)
+        self._hm_left.set_diff_grid(self._model.left_grid - self._model.locked_left_grid)
+        self._hm_right.set_diff_grid(self._model.right_grid - self._model.locked_right_grid)
 
     def _refresh_3d(self):
         if not self._3d_canvas or not self._3d_axes or not self._model:
             return
         grids = {
-            0: (self._model.left_grid, self._model.base_left_grid),
-            1: (self._model.right_grid, self._model.base_right_grid),
+            0: (self._model.left_grid, self._model.locked_left_grid),
+            1: (self._model.right_grid, self._model.locked_right_grid),
         }
         diff_enabled = self._btn_diff.isChecked()
         for i, ax in enumerate(self._3d_axes):

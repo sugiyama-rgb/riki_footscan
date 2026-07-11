@@ -109,6 +109,7 @@ def test_layer_to_json_dict_converts_ndarray_params_to_list():
         "operation": "erase",
         "params": {"foot": "left", "mask": [[True, False], [False, True]]},
         "enabled": True,
+        "locked": False,
     }
 
 
@@ -125,7 +126,20 @@ def test_layer_to_json_dict_passes_through_non_array_params():
         "operation": "noise_removal",
         "params": {},
         "enabled": True,
+        "locked": False,
     }
+
+
+def test_layer_to_json_dict_includes_locked_true():
+    layer = LayerRecord(
+        name="位置調整 右足",
+        operation="position_adjust",
+        params={"foot": "right", "dx_cm": 1.0, "dy_cm": 0.0, "angle_deg": 0.0},
+        enabled=True,
+        locked=True,
+    )
+    result = _layer_to_json_dict(layer)
+    assert result["locked"] is True
 
 
 # ─────────────────────── _reset_marks_dirty ───────────────────────

@@ -37,6 +37,7 @@ class LayerRecord:
     operation: str  # "noise_removal" | "erase" | "mirror_mask" | "mirror_copy" | "arch" | "metatarsal" | "position_adjust"
     params: dict
     enabled: bool = True
+    locked: bool = False
 
 
 class FootModel:
@@ -71,12 +72,23 @@ class FootModel:
     def layers(self) -> list[LayerRecord]:
         return self._layers
 
-    def _recompute(self) -> None:
+    @property
+    def locked_left_grid(self) -> np.ndarray:
+        return self._fold_layers(lambda l: l.enabled and l.locked)[grd_io.LEFT_ROWS]
+
+    @property
+    def locked_right_grid(self) -> np.ndarray:
+        return self._fold_layers(lambda l: l.enabled and l.locked)[grd_io.RIGHT_ROWS]
+
+    def _fold_layers(self, predicate) -> np.ndarray:
         grid = self._base_grid.copy()
         for layer in self._layers:
-            if layer.enabled:
+            if predicate(layer):
                 grid = _apply_operation(grid, layer.operation, layer.params, base_grid=self._base_grid)
-        self._grd.grid = grid
+        return grid
+
+    def _recompute(self) -> None:
+        self._grd.grid = self._fold_layers(lambda l: l.enabled)
 
     def _add_layer(self, layer: LayerRecord) -> None:
         self._layers.append(layer)
@@ -88,8 +100,14 @@ class FootModel:
             self._layers[index].enabled = not self._layers[index].enabled
             self._recompute()
 
+    def toggle_layer_lock(self, index: int) -> None:
+        if 0 <= index < len(self._layers):
+            self._layers[index].locked = not self._layers[index].locked
+
     def set_all_enabled(self, enabled: bool) -> None:
         for layer in self._layers:
+            if layer.locked:
+                continue
             layer.enabled = enabled
         self._recompute()
 
@@ -190,11 +208,6 @@ class FootModel:
         before_cells = int((self._grd.grid[sl] < 0).sum())
 
         foot_label = "左足" if foot == "left" else "右足"
-        new_layer = LayerRecord(
-            name=f"位置調整 {foot_label} (左右{dx_cm:+.1f}cm/前後{dy_cm:+.1f}cm/角度{angle_deg:+.1f}°)",
-            operation="position_adjust",
-            params={"foot": foot, "dx_cm": dx_cm, "dy_cm": dy_cm, "angle_deg": angle_deg},
-        )
 
         # 同じ足に対する position_adjust レイヤーが既にある場合は追加ではなく置き換える。
         # 追加してしまうと、適用のたびに前回の補間結果へさらに補間をかける「多重ボケ」が
@@ -204,6 +217,16 @@ class FootModel:
              if layer.operation == "position_adjust" and layer.params["foot"] == foot),
             None,
         )
+        # 位置調整（前処理）は見直すことがないため新規作成時は自動的に固定扱いにする。
+        # 既存レイヤーの置き換え時は、ユーザーが手動で固定を解除していた場合はその状態を引き継ぐ。
+        locked = self._layers[existing_idx].locked if existing_idx is not None else True
+        new_layer = LayerRecord(
+            name=f"位置調整 {foot_label} (左右{dx_cm:+.1f}cm/前後{dy_cm:+.1f}cm/角度{angle_deg:+.1f}°)",
+            operation="position_adjust",
+            params={"foot": foot, "dx_cm": dx_cm, "dy_cm": dy_cm, "angle_deg": angle_deg},
+            locked=locked,
+        )
+
         if existing_idx is not None:
             self._layers[existing_idx] = new_layer
             self._redo_stack.clear()
