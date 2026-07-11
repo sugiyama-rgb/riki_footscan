@@ -22,6 +22,7 @@ import grd_io
 from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, preview_arch_max
 from heatmap_widget import HeatmapWidget
 from toast_widget import ToastWidget
+from changelog import CHANGELOG_ENTRIES, ChangelogDialog
 from version import VERSION
 
 
@@ -413,6 +414,9 @@ class MainWindow(QMainWindow):
         settings_menu = menu_bar.addMenu("設定")
         act_settings = settings_menu.addAction("設定を開く...")
         act_settings.triggered.connect(self._open_settings)
+
+        act_changelog = menu_bar.addAction("更新内容")
+        act_changelog.triggered.connect(self._show_changelog)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1275,6 +1279,9 @@ class MainWindow(QMainWindow):
             values = dlg.get_values()
             _save_settings(values)
             self._defaults = values
+
+    def _show_changelog(self):
+        ChangelogDialog(CHANGELOG_ENTRIES, parent=self).exec()
 
     def _apply_arch(self):
         if not self._model:
