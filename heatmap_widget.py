@@ -60,6 +60,10 @@ class HeatmapWidget(QWidget):
         self._is_selecting = False
         self._is_deselecting = False
         self._select_mode = False
+        self._is_rect_selecting = False
+        self._rect_start: tuple | None = None
+        self._rect_current: tuple | None = None
+        self._rect_subtract = False
         self._meta_center: tuple | None = None
         self._mirror_mask: np.ndarray | None = None
         self._angle_guide: tuple | None = None
@@ -314,6 +318,18 @@ class HeatmapWidget(QWidget):
                     if c == cols - 1 or not self._mirror_mask[r, c + 1]:
                         p.drawLine(x + cp - 1, y, x + cp - 1, y + cp - 1)
 
+        # 矩形選択プレビュー（Shift+ドラッグ中）
+        if self._is_rect_selecting and self._rect_start is not None and self._rect_current is not None:
+            r0, c0 = self._rect_start
+            r1, c1 = self._rect_current
+            rmin, rmax = sorted((r0, r1))
+            cmin, cmax = sorted((c0, c1))
+            x0, y0 = self._grid_to_px(rmin, cmin)
+            x1, y1 = self._grid_to_px(rmax, cmax)
+            pen = QPen(QColor(255, 0, 0) if self._rect_subtract else QColor(0, 230, 255), 2, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawRect(x0, y0, x1 + cp - x0, y1 + cp - y0)
+
         # ── 踵距離ルーラー ──
         font.setPointSize(7)
         font.setBold(False)
@@ -357,9 +373,17 @@ class HeatmapWidget(QWidget):
             r, c = self._px_to_grid(event.position().x(), event.position().y())
             if 0 <= r < 32 and 0 <= c < 16:
                 ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
                 self.cellClicked.emit(r, c)
                 if self._select_mode:
-                    if ctrl:
+                    if shift:
+                        # Shift+ドラッグ: 始点〜終点を対角とする矩形を一括選択（Ctrl併用で解除）
+                        self._is_rect_selecting = True
+                        self._rect_start = (r, c)
+                        self._rect_current = (r, c)
+                        self._rect_subtract = ctrl
+                        self.update()
+                    elif ctrl:
                         self._is_deselecting = True
                         self._sel_mask[r, c] = False
                         self.selectionChanged.emit(self._sel_mask.copy())
@@ -376,7 +400,10 @@ class HeatmapWidget(QWidget):
         r, c = self._px_to_grid(event.position().x(), event.position().y())
         if not (0 <= r < 32 and 0 <= c < 16):
             return
-        if self._is_selecting:
+        if self._is_rect_selecting:
+            self._rect_current = (r, c)
+            self.update()
+        elif self._is_selecting:
             self._sel_mask[r, c] = True
             self.selectionChanged.emit(self._sel_mask.copy())
             self.update()
@@ -386,5 +413,16 @@ class HeatmapWidget(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._is_rect_selecting and self._rect_start is not None and self._rect_current is not None:
+            r0, c0 = self._rect_start
+            r1, c1 = self._rect_current
+            rmin, rmax = sorted((r0, r1))
+            cmin, cmax = sorted((c0, c1))
+            self._sel_mask[rmin:rmax + 1, cmin:cmax + 1] = not self._rect_subtract
+            self.selectionChanged.emit(self._sel_mask.copy())
         self._is_selecting = False
         self._is_deselecting = False
+        self._is_rect_selecting = False
+        self._rect_start = None
+        self._rect_current = None
+        self.update()

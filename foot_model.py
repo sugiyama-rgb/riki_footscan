@@ -28,13 +28,21 @@ class ArchParams:
     smoothing: float = 1.5    # ぼかし半径 (グリッド単位)
 
 
+@dataclass
+class SmoothParams:
+    # 選択済みマスク (32×16 の bool配列)
+    mask: Optional[np.ndarray] = None
+    threshold_mm: float = 2.0  # 局所中央値からの乖離がこの値を超えたセルのみ「スパイク」とみなす（小さいほど敏感）
+    strength: float = 1.0      # 補正の強さ（0=補正なし、1=中央値へ完全に置換）
+
+
 ARCH_MAX_LOWER_MM = 10.0  # へこませる方向: ベーススキャン値からの最大掘り込み量 (mm)
 
 
 @dataclass
 class LayerRecord:
     name: str
-    operation: str  # "noise_removal" | "erase" | "mirror_mask" | "mirror_copy" | "arch" | "metatarsal" | "position_adjust"
+    operation: str  # "noise_removal" | "erase" | "mirror_mask" | "mirror_copy" | "arch" | "metatarsal" | "position_adjust" | "smoothing"
     params: dict
     enabled: bool = True
     locked: bool = False
@@ -270,6 +278,30 @@ class FootModel:
         }
 
     # ──────────────────────────────────────────
+    # スムージング（スパイク検出＋補正）
+    # ──────────────────────────────────────────
+    def apply_smoothing(self, foot: str, params: SmoothParams) -> dict | None:
+        if params.mask is None:
+            return None
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        prev = self._grd.grid[sl].copy()
+        foot_label = "左足" if foot == "left" else "右足"
+        self._add_layer(LayerRecord(
+            name=f"スムージング {foot_label}",
+            operation="smoothing",
+            params={
+                "foot": foot,
+                "mask": params.mask.copy(),
+                "threshold_mm": params.threshold_mm,
+                "strength": params.strength,
+            },
+        ))
+        diff = self._grd.grid[sl] - prev
+        return {
+            "affected": int(np.sum(np.abs(diff) > 0.05)),
+        }
+
+    # ──────────────────────────────────────────
     # メタターサルサポート
     # ──────────────────────────────────────────
     def apply_metatarsal(self, foot: str, params: MetatarsalParams) -> dict:
@@ -401,6 +433,20 @@ def _apply_operation(grid: np.ndarray, operation: str, params: dict, base_grid: 
             front_offset=params.get("front_offset", 0.0),
         )
         result[sl] = np.minimum(block + bump, 0.0)
+
+    elif operation == "smoothing":
+        foot = params["foot"]
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        mask = params["mask"]
+        block = result[sl].copy()
+        contact = (block < 0).astype(np.uint8)
+        # 3×3近傍が全て接触セルの内部のみを対象にする（足の輪郭境界での誤検出を防止）
+        interior = ndimage.minimum_filter(contact, size=3, mode="constant", cval=0) > 0
+        median = ndimage.median_filter(block, size=3, mode="nearest")
+        diff = block - median
+        spike = mask & interior & (np.abs(diff) > params["threshold_mm"])
+        block[spike] = block[spike] - diff[spike] * params["strength"]
+        result[sl] = block
 
     return result
 

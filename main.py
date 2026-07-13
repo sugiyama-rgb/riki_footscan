@@ -19,7 +19,7 @@ from datetime import datetime
 from platformdirs import user_config_dir
 
 import grd_io
-from foot_model import FootModel, ArchParams, MetatarsalParams, LayerRecord, preview_arch_max
+from foot_model import FootModel, ArchParams, MetatarsalParams, SmoothParams, LayerRecord, preview_arch_max
 from heatmap_widget import HeatmapWidget
 from toast_widget import ToastWidget
 from changelog import CHANGELOG_ENTRIES, ChangelogDialog
@@ -396,6 +396,7 @@ class MainWindow(QMainWindow):
         self._arch_params = ArchParams()
         self._meta_params = MetatarsalParams()
         self._erase_select_mode = False
+        self._smooth_select_mode = False
         self._dirty = False
 
         self._3d_dialog = None
@@ -695,6 +696,58 @@ class MainWindow(QMainWindow):
         btn_apply_mirror_copy.clicked.connect(self._apply_mirror_copy)
         mirror_copy_layout.addWidget(btn_apply_mirror_copy)
         layout.addWidget(mirror_copy_box)
+
+        # ④ スムージング
+        smooth_box = QGroupBox("④ スムージング")
+        smooth_layout = QVBoxLayout(smooth_box)
+        smooth_layout.setSpacing(4)
+        smooth_layout.addWidget(QLabel("対象足:"))
+        self._smooth_foot_combo = QComboBox()
+        self._smooth_foot_combo.addItems(["左足", "右足"])
+        smooth_layout.addWidget(self._smooth_foot_combo)
+        lbl_smooth = QLabel(
+            "足部形状と反したスパイク状の凹凸を検出して補正します。\n"
+            "ドラッグで個別選択／Shift+ドラッグで矩形選択／Ctrlで選択解除"
+        )
+        lbl_smooth.setWordWrap(True)
+        smooth_layout.addWidget(lbl_smooth)
+        self._btn_smooth_select = QPushButton("選択モード ON")
+        self._btn_smooth_select.setCheckable(True)
+        self._btn_smooth_select.toggled.connect(self._toggle_smooth_select)
+        smooth_layout.addWidget(self._btn_smooth_select)
+        btn_clear_smooth = QPushButton("選択をクリア")
+        btn_clear_smooth.clicked.connect(self._clear_smooth_selection)
+        smooth_layout.addWidget(btn_clear_smooth)
+
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("スパイク判定閾値(mm) ※小さいほど敏感:"))
+        self._smooth_threshold = QDoubleSpinBox()
+        self._smooth_threshold.setRange(0.5, 10.0)
+        self._smooth_threshold.setSingleStep(0.5)
+        self._smooth_threshold.setDecimals(1)
+        self._smooth_threshold.setValue(2.0)
+        threshold_row.addWidget(self._smooth_threshold)
+        smooth_layout.addLayout(threshold_row)
+
+        strength_row = QHBoxLayout()
+        strength_row.addWidget(QLabel("補正強度 (0〜1):"))
+        self._smooth_strength = QDoubleSpinBox()
+        self._smooth_strength.setRange(0.0, 1.0)
+        self._smooth_strength.setSingleStep(0.1)
+        self._smooth_strength.setDecimals(1)
+        self._smooth_strength.setValue(1.0)
+        strength_row.addWidget(self._smooth_strength)
+        smooth_layout.addLayout(strength_row)
+
+        btn_apply_smooth = QPushButton("スムージングを適用")
+        btn_apply_smooth.clicked.connect(self._apply_smoothing)
+        smooth_layout.addWidget(btn_apply_smooth)
+
+        self._smooth_stats_label = QLabel("")
+        self._smooth_stats_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
+        smooth_layout.addWidget(self._smooth_stats_label)
+
+        layout.addWidget(smooth_box)
 
         step_row = QHBoxLayout()
         btn_nu = QPushButton("↩ 戻す")
@@ -1089,6 +1142,8 @@ class MainWindow(QMainWindow):
         self._hm_right.set_select_mode(checked and foot == "right")
         if checked and self._btn_arch_select.isChecked():
             self._btn_arch_select.setChecked(False)
+        if checked and self._btn_smooth_select.isChecked():
+            self._btn_smooth_select.setChecked(False)
 
     def _clear_erase_selection(self):
         self._hm_left.clear_selection()
@@ -1109,6 +1164,45 @@ class MainWindow(QMainWindow):
         hm.clear_selection()
         self._refresh_heatmaps()
         self._update_status(f"手動消去: {mask.sum()} セル選択 / {n} ピンをゼロ化")
+
+    def _toggle_smooth_select(self, checked: bool):
+        self._smooth_select_mode = checked
+        self._btn_smooth_select.setText(
+            "選択モード ON (ドラッグ選択 / Shift+ドラッグで矩形選択)" if checked else "選択モード OFF"
+        )
+        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
+        self._hm_left.set_select_mode(checked and foot == "left")
+        self._hm_right.set_select_mode(checked and foot == "right")
+        if checked and self._btn_erase_select.isChecked():
+            self._btn_erase_select.setChecked(False)
+        if checked and self._btn_arch_select.isChecked():
+            self._btn_arch_select.setChecked(False)
+
+    def _clear_smooth_selection(self):
+        self._hm_left.clear_selection()
+        self._hm_right.clear_selection()
+
+    def _apply_smoothing(self):
+        if not self._model:
+            QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
+            return
+        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
+        hm = self._hm_left if foot == "left" else self._hm_right
+        mask = hm.get_selection_mask()
+        if not mask.any():
+            QMessageBox.information(self, "情報", "スムージングする領域をドラッグして選択してください")
+            return
+        params = SmoothParams(
+            mask=mask,
+            threshold_mm=self._smooth_threshold.value(),
+            strength=self._smooth_strength.value(),
+        )
+        stats = self._model.apply_smoothing(foot, params)
+        self._btn_smooth_select.setChecked(False)
+        hm.clear_selection()
+        self._refresh_heatmaps()
+        self._smooth_stats_label.setText(f"補正したセル数: {stats['affected']}")
+        self._update_status(f"スムージング: {mask.sum()} セル選択 / {stats['affected']} セルを補正")
 
     def _apply_mirror_mask(self):
         if not self._model:
@@ -1219,6 +1313,8 @@ class MainWindow(QMainWindow):
             self._hm_right.set_mirror_mask(None)
         if checked and self._btn_erase_select.isChecked():
             self._btn_erase_select.setChecked(False)
+        if checked and self._btn_smooth_select.isChecked():
+            self._btn_smooth_select.setChecked(False)
 
     def _clear_arch_selection(self):
         self._hm_left.clear_selection()
@@ -1247,8 +1343,8 @@ class MainWindow(QMainWindow):
         return magnitude if self._arch_raise_radio.isChecked() else -magnitude
 
     def _on_selection_changed(self, foot: str, mask: np.ndarray):
-        if self._erase_select_mode:
-            pass  # erase適用時にget_selection_maskで取得するため保持不要
+        if self._erase_select_mode or self._smooth_select_mode:
+            pass  # erase/スムージング適用時にget_selection_maskで取得するため保持不要
         else:
             self._arch_params.mask = mask
             other = self._hm_right if foot == "left" else self._hm_left
