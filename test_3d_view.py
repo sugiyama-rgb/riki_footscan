@@ -10,7 +10,15 @@ import numpy as np
 import pytest
 from matplotlib.figure import Figure
 
-from main import _lookup_view, _render_foot_surface, _SPLIT_VIEW_LABELS
+from main import _lookup_view, _render_foot_surface, _SPLIT_VIEW_LABELS, _initial_azim
+
+
+def test_initial_azim_left_foot_is_unchanged():
+    assert _initial_azim(0) == -55
+
+
+def test_initial_azim_right_foot_is_mirrored():
+    assert _initial_azim(1) == -125
 
 
 def test_lookup_view_returns_matching_spec():

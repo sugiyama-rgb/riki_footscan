@@ -180,6 +180,22 @@ _SPLIT_VIEW_DISPLAY: dict[str, str] = {"後方": "後面", "内側": "内側面"
 _SPLIT_ZOOM = 2.0
 
 
+# 通常モード初期表示のazim（方位角）。右足は左足に対する見やすさの要望に応え、
+# 足幅方向（左右）だけをカメラ角度のみで対称にする。データ・軸の向き
+# （invert_xaxis/invert_yaxis）には触れない。
+# 単純な符号反転（前額面プリセットの前方/後方と同じ変換）は前後（つま先/かかと）
+# 方向まで反転してしまうため使わない。矢状面プリセット（内側/外側）と同じ、
+# azim=-90を軸に対称な変換（azim2 = -180 - azim1）を使うことで、
+# 前後方向を保ったまま左右方向のみ対称なカメラ角度になる。
+_INITIAL_AZIM_LEFT = -55
+_INITIAL_AZIM_RIGHT = -180 - _INITIAL_AZIM_LEFT  # = -125
+
+
+def _initial_azim(foot_idx: int) -> int:
+    """通常モード初期表示時のazimをfoot_idxから返す（0=左足, 1=右足）。"""
+    return _INITIAL_AZIM_RIGHT if foot_idx == 1 else _INITIAL_AZIM_LEFT
+
+
 def _lookup_view(label: str) -> _ViewSpec:
     """_VIEW_GROUPS からラベル名で視点定義を検索する。"""
     for _, views in _VIEW_GROUPS:
@@ -1596,7 +1612,7 @@ class MainWindow(QMainWindow):
                 rows, cols = grid.shape
                 ax.set_title(label, fontsize=12, color='white', pad=-15)
                 ax.set_box_aspect([cols, rows, 2])
-                ax.view_init(elev=25, azim=-55)
+                ax.view_init(elev=25, azim=_initial_azim(foot_idx))
                 ax.set_axis_off()
                 self._3d_axes.append(ax)
                 self._3d_axis_feet.append(foot_idx)
