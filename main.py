@@ -23,6 +23,7 @@ from foot_model import FootModel, ArchParams, MetatarsalParams, SmoothParams, La
 from heatmap_widget import HeatmapWidget
 from toast_widget import ToastWidget
 from changelog import CHANGELOG_ENTRIES, ChangelogDialog
+from usage_dialog import USAGE_SECTIONS, UsageDialog
 from version import VERSION
 
 
@@ -440,6 +441,9 @@ class MainWindow(QMainWindow):
 
         act_changelog = menu_bar.addAction("更新内容")
         act_changelog.triggered.connect(self._show_changelog)
+
+        act_usage = menu_bar.addAction("使い方")
+        act_usage.triggered.connect(self._show_usage)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1402,6 +1406,9 @@ class MainWindow(QMainWindow):
 
     def _show_changelog(self):
         ChangelogDialog(CHANGELOG_ENTRIES, parent=self).exec()
+
+    def _show_usage(self):
+        UsageDialog(USAGE_SECTIONS, parent=self).exec()
 
     def _apply_arch(self):
         if not self._model:
