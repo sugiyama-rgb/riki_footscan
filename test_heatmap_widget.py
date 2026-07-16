@@ -121,3 +121,36 @@ def test_state_resets_after_rect_drag_so_next_plain_drag_paints_normally(hm):
     mask = hm.get_selection_mask()
     assert mask[20, 3]
     assert mask.sum() == (5 * 4) + 1  # 矩形4x5 + 通常ドラッグ1セル
+
+
+# ─────────────────────── set_reference_mask（矯正範囲の参考表示・新規） ───────────────────────
+
+def test_set_reference_mask_stores_mask(hm):
+    mask = np.zeros((32, 16), dtype=bool)
+    mask[3, 4] = True
+
+    hm.set_reference_mask(mask)
+
+    assert hm._reference_mask[3, 4]
+
+
+def test_set_reference_mask_none_clears_it(hm):
+    mask = np.zeros((32, 16), dtype=bool)
+    mask[3, 4] = True
+    hm.set_reference_mask(mask)
+
+    hm.set_reference_mask(None)
+
+    assert hm._reference_mask is None
+
+
+def test_set_reference_mask_does_not_mutate_sel_mask(hm):
+    _drag(hm, [(5, 5)])
+    ref = np.zeros((32, 16), dtype=bool)
+    ref[3, 4] = True
+
+    hm.set_reference_mask(ref)
+
+    mask = hm.get_selection_mask()
+    assert mask[5, 5]
+    assert not mask[3, 4]

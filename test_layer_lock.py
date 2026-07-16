@@ -185,3 +185,57 @@ def test_undo_redo_preserves_locked_state():
     assert model.undo() is True
     assert model.redo() is True
     assert model.layers[0].locked is True
+
+
+# ─────────────────────── remove_layer（レイヤー削除） ───────────────────────
+
+def test_remove_layer_removes_layer_at_index():
+    model = _make_model(right_point=((10, 5), -8.0))
+    model.erase_cells("right", _mask_at(10, 5))
+    model.erase_cells("right", _mask_at(20, 8))
+
+    model.remove_layer(0)
+
+    assert len(model.layers) == 1
+    assert model.layers[0].params["mask"][20, 8]
+
+
+def test_remove_layer_out_of_range_does_nothing():
+    model = _make_model(right_point=((10, 5), -8.0))
+    model.erase_cells("right", _mask_at(10, 5))
+
+    model.remove_layer(5)
+    model.remove_layer(-1)
+
+    assert len(model.layers) == 1
+
+
+def test_remove_layer_recomputes_active_grid():
+    model = _make_model(right_point=((10, 5), -8.0))
+    model.erase_cells("right", _mask_at(10, 5))
+    assert model.grd.grid[10, 5] == 0.0
+
+    model.remove_layer(0)
+
+    assert model.grd.grid[10, 5] == pytest.approx(-8.0)
+
+
+def test_remove_layer_clears_redo_stack():
+    model = _make_model(right_point=((10, 5), -8.0))
+    model.erase_cells("right", _mask_at(10, 5))
+    model.erase_cells("right", _mask_at(20, 8))
+    model.undo()  # redo_stackに1件積まれる
+
+    model.remove_layer(0)
+
+    assert model.redo() is False
+
+
+def test_remove_layer_works_on_locked_layer():
+    model = _make_model(right_point=((10, 5), -8.0))
+    model.erase_cells("right", _mask_at(10, 5))
+    model.toggle_layer_lock(0)
+
+    model.remove_layer(0)
+
+    assert model.layers == []

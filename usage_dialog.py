@@ -1,4 +1,5 @@
 """メニューバー「使い方」に表示する操作ガイド"""
+import html as html_lib
 from dataclasses import dataclass
 
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
@@ -78,6 +79,17 @@ def format_usage_text(sections: list[UsageSection]) -> str:
     return "\n\n".join(blocks)
 
 
+def format_usage_html(sections: list[UsageSection]) -> str:
+    blocks = []
+    for section in sections:
+        title = html_lib.escape(section.title)
+        lines = [f"<p><b>【{title}】</b></p>"]
+        for item in section.items:
+            lines.append(f"<p>・{html_lib.escape(item)}</p>")
+        blocks.append("".join(lines))
+    return "".join(blocks)
+
+
 class UsageDialog(QDialog):
     def __init__(self, sections: list[UsageSection], parent=None):
         super().__init__(parent)
@@ -88,7 +100,7 @@ class UsageDialog(QDialog):
 
         self._text_edit = QTextEdit()
         self._text_edit.setReadOnly(True)
-        self._text_edit.setPlainText(format_usage_text(sections))
+        self._text_edit.setHtml(format_usage_html(sections))
         layout.addWidget(self._text_edit)
 
         btn_close = QPushButton("閉じる")

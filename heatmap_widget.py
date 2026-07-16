@@ -66,6 +66,7 @@ class HeatmapWidget(QWidget):
         self._rect_subtract = False
         self._meta_center: tuple | None = None
         self._mirror_mask: np.ndarray | None = None
+        self._reference_mask: np.ndarray | None = None
         self._angle_guide: tuple | None = None
         self._diff_grid: np.ndarray | None = None
         self._cell_px: int = DEFAULT_CELL_PX
@@ -122,6 +123,10 @@ class HeatmapWidget(QWidget):
 
     def set_mirror_mask(self, mask: np.ndarray | None):
         self._mirror_mask = mask
+        self.update()
+
+    def set_reference_mask(self, mask: np.ndarray | None):
+        self._reference_mask = mask
         self.update()
 
     def set_angle_guide(self, line: tuple | None):
@@ -317,6 +322,31 @@ class HeatmapWidget(QWidget):
                         p.drawLine(x, y, x, y + cp - 1)
                     if c == cols - 1 or not self._mirror_mask[r, c + 1]:
                         p.drawLine(x + cp - 1, y, x + cp - 1, y + cp - 1)
+
+        # 参照範囲ボーダー（黒縁取り＋白破線）— 過去レイヤーの矯正範囲を参考表示する。
+        # ヒートマップは黒〜マゼンタまで全色域を使うため単色線だと同化するので、
+        # 背景色によらず見えるよう黒の縁取りに白の破線を重ねる。
+        if self._reference_mask is not None and self._reference_mask.any():
+            segments: list[tuple[int, int, int, int]] = []
+            for r in range(rows):
+                for c in range(cols):
+                    if not self._reference_mask[r, c]:
+                        continue
+                    x, y = self._grid_to_px(r, c)
+                    if r == 0 or not self._reference_mask[r - 1, c]:
+                        segments.append((x, y, x + cp - 1, y))
+                    if r == rows - 1 or not self._reference_mask[r + 1, c]:
+                        segments.append((x, y + cp - 1, x + cp - 1, y + cp - 1))
+                    if c == 0 or not self._reference_mask[r, c - 1]:
+                        segments.append((x, y, x, y + cp - 1))
+                    if c == cols - 1 or not self._reference_mask[r, c + 1]:
+                        segments.append((x + cp - 1, y, x + cp - 1, y + cp - 1))
+            p.setPen(QPen(QColor(0, 0, 0), 4))
+            for x0, y0, x1, y1 in segments:
+                p.drawLine(x0, y0, x1, y1)
+            p.setPen(QPen(QColor(255, 255, 255), 2, Qt.PenStyle.DashLine))
+            for x0, y0, x1, y1 in segments:
+                p.drawLine(x0, y0, x1, y1)
 
         # 矩形選択プレビュー（Shift+ドラッグ中）
         if self._is_rect_selecting and self._rect_start is not None and self._rect_current is not None:

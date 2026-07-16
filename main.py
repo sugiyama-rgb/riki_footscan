@@ -665,6 +665,7 @@ class MainWindow(QMainWindow):
         erase_layout.addWidget(QLabel("対象足:"))
         self._erase_foot_combo = QComboBox()
         self._erase_foot_combo.addItems(["左足", "右足"])
+        self._erase_foot_combo.currentIndexChanged.connect(self._sync_erase_select_mode)
         erase_layout.addWidget(self._erase_foot_combo)
         lbl_erase = QLabel("ヒートマップ上でドラッグして消去する領域を選択")
         lbl_erase.setWordWrap(True)
@@ -724,6 +725,7 @@ class MainWindow(QMainWindow):
         smooth_layout.addWidget(QLabel("対象足:"))
         self._smooth_foot_combo = QComboBox()
         self._smooth_foot_combo.addItems(["左足", "右足"])
+        self._smooth_foot_combo.currentIndexChanged.connect(self._sync_smooth_select_mode)
         smooth_layout.addWidget(self._smooth_foot_combo)
         lbl_smooth = QLabel(
             "足部形状と反したスパイク状の凹凸を検出して補正します。\n"
@@ -791,6 +793,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("対象足:"))
         self._arch_foot_combo = QComboBox()
         self._arch_foot_combo.addItems(["左足", "右足"])
+        self._arch_foot_combo.currentIndexChanged.connect(self._sync_arch_select_mode)
         layout.addWidget(self._arch_foot_combo)
 
         layout.addWidget(QLabel("① ヒートマップ上でアーチ領域を\n   ドラッグして選択してください"))
@@ -1165,6 +1168,13 @@ class MainWindow(QMainWindow):
         if checked and self._btn_smooth_select.isChecked():
             self._btn_smooth_select.setChecked(False)
 
+    def _sync_erase_select_mode(self, *_args):
+        if not self._btn_erase_select.isChecked():
+            return
+        foot = "left" if self._erase_foot_combo.currentIndex() == 0 else "right"
+        self._hm_left.set_select_mode(foot == "left")
+        self._hm_right.set_select_mode(foot == "right")
+
     def _clear_erase_selection(self):
         self._hm_left.clear_selection()
         self._hm_right.clear_selection()
@@ -1197,6 +1207,13 @@ class MainWindow(QMainWindow):
             self._btn_erase_select.setChecked(False)
         if checked and self._btn_arch_select.isChecked():
             self._btn_arch_select.setChecked(False)
+
+    def _sync_smooth_select_mode(self, *_args):
+        if not self._btn_smooth_select.isChecked():
+            return
+        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
+        self._hm_left.set_select_mode(foot == "left")
+        self._hm_right.set_select_mode(foot == "right")
 
     def _clear_smooth_selection(self):
         self._hm_left.clear_selection()
@@ -1335,6 +1352,18 @@ class MainWindow(QMainWindow):
             self._btn_erase_select.setChecked(False)
         if checked and self._btn_smooth_select.isChecked():
             self._btn_smooth_select.setChecked(False)
+
+    def _sync_arch_select_mode(self, *_args):
+        if not self._btn_arch_select.isChecked():
+            return
+        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+        self._hm_left.set_select_mode(foot == "left")
+        self._hm_right.set_select_mode(foot == "right")
+        # 足が変わったので古いプレビュー状態を破棄する
+        self._arch_params.mask = None
+        self._hm_left.set_mirror_mask(None)
+        self._hm_right.set_mirror_mask(None)
+        self._update_arch_preview_label()
 
     def _clear_arch_selection(self):
         self._hm_left.clear_selection()
@@ -1806,6 +1835,8 @@ class MainWindow(QMainWindow):
         self._update_diff_overlay()
 
     def _refresh_layer_list(self):
+        self._hm_left.set_reference_mask(None)
+        self._hm_right.set_reference_mask(None)
         if not self._model:
             self._layer_list.clear()
             return
@@ -1847,9 +1878,16 @@ class MainWindow(QMainWindow):
         i = item.data(Qt.ItemDataRole.UserRole)
         layer = self._model.layers[i]
         menu = QMenu(self._layer_list)
-        action = menu.addAction("固定を解除" if layer.locked else "固定にする")
+        action_lock = menu.addAction("固定を解除" if layer.locked else "固定にする")
+        menu.addSeparator()
+        action_show_range = menu.addAction("範囲を表示")
+        action_show_range.setEnabled("mask" in layer.params)
+        action_clear_range = menu.addAction("範囲表示をクリア")
+        menu.addSeparator()
+        action_delete = menu.addAction("削除")
         chosen = menu.exec(self._layer_list.mapToGlobal(pos))
-        if chosen is action:
+
+        if chosen is action_lock:
             name = layer.name
             state = "解除" if layer.locked else "設定"  # トグル前の値から先に文言を決める
             self._model.toggle_layer_lock(i)
@@ -1857,6 +1895,33 @@ class MainWindow(QMainWindow):
             self._update_diff_overlay()
             self._refresh_3d()
             self._update_status(f"レイヤーの固定を{state}しました: {name}")
+        elif chosen is action_show_range:
+            mask = layer.params["mask"]
+            own_hm = self._hm_left if layer.params["foot"] == "left" else self._hm_right
+            own_hm.set_reference_mask(mask)
+            self._update_status(f"範囲を表示しました: {layer.name}")
+        elif chosen is action_clear_range:
+            self._hm_left.set_reference_mask(None)
+            self._hm_right.set_reference_mask(None)
+            self._update_status("範囲表示をクリアしました")
+        elif chosen is action_delete:
+            has_dependents = layer.operation == "position_adjust" and any(
+                not l.locked for l in self._model.layers[i + 1:]
+            )
+            msg = (
+                "このレイヤーを削除すると、後に追加した補正の位置がずれる可能性があります。\n"
+                "この操作は元に戻せません。削除しますか？"
+                if has_dependents else
+                f"レイヤー『{layer.name}』を削除しますか？\nこの操作は元に戻せません。"
+            )
+            reply = QMessageBox.question(
+                self, "確認", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._model.remove_layer(i)
+                self._refresh_heatmaps()
+                self._update_status(f"レイヤーを削除しました: {layer.name}")
 
     def _on_toggle_all_layers(self, checked: bool) -> None:
         if not self._model:

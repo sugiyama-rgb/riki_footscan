@@ -112,6 +112,12 @@ class FootModel:
         if 0 <= index < len(self._layers):
             self._layers[index].locked = not self._layers[index].locked
 
+    def remove_layer(self, index: int) -> None:
+        if 0 <= index < len(self._layers):
+            self._layers.pop(index)
+            self._redo_stack.clear()
+            self._recompute()
+
     def set_all_enabled(self, enabled: bool) -> None:
         for layer in self._layers:
             if layer.locked:
