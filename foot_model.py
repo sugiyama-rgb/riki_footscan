@@ -283,6 +283,25 @@ class FootModel:
             "affected": int(np.sum(np.abs(diff) > 0.05)),
         }
 
+    def preview_arch(self, foot: str, params: ArchParams) -> np.ndarray:
+        """レイヤーを積まずに、アーチ調整を適用した場合の足グリッドを返す（埋め込み3Dプレビュー用）。
+        apply_arch は末尾にレイヤーを積んで有効レイヤーを畳み込み直すだけなので、
+        現在のグリッドに同じ操作を1回適用した結果は適用後と一致する。"""
+        sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
+        if params.mask is None or not params.mask.any():
+            return self._grd.grid[sl].copy()
+        result = _apply_operation(
+            self._grd.grid, "arch",
+            {
+                "foot": foot,
+                "mask": params.mask,
+                "height_mm": params.height_mm,
+                "smoothing": params.smoothing,
+            },
+            base_grid=self._base_grid,
+        )
+        return result[sl]
+
     # ──────────────────────────────────────────
     # スムージング（スパイク検出＋補正）
     # ──────────────────────────────────────────

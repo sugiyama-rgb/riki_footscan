@@ -425,6 +425,8 @@ class MainWindow(QMainWindow):
         self._3d_x_flip: list = [False, False]
         self._3d_y_flip: list = [False, False]
         self._3d_split_mode: bool = False
+        # ヒートマップ横の埋め込み3D（起動を遅くしないよう最初のファイル読込時に生成）
+        self._mini_3d: dict = {}
 
         self._defaults = _load_settings()
         self._build_ui()
@@ -527,6 +529,16 @@ class MainWindow(QMainWindow):
         btn_3d = QPushButton("3D表示を開く")
         btn_3d.clicked.connect(self._show_3d_view)
         view_form.addWidget(btn_3d)
+        # ヒートマップ横の埋め込み3Dの視点（両足まとめて切り替える）
+        mini_view_row = QHBoxLayout()
+        mini_view_row.addWidget(QLabel("横の3D:"))
+        btn_mini_top = QPushButton("真上")
+        btn_mini_top.clicked.connect(self._reset_mini_3d_view)
+        btn_mini_back = QPushButton("後面")
+        btn_mini_back.clicked.connect(lambda: self._set_mini_3d_view("後方"))
+        mini_view_row.addWidget(btn_mini_top)
+        mini_view_row.addWidget(btn_mini_back)
+        view_form.addLayout(mini_view_row)
         tool_layout.addWidget(view_box)
 
         # 調整レイヤー
@@ -816,7 +828,7 @@ class MainWindow(QMainWindow):
         self._arch_direction_group = QButtonGroup(w)
         self._arch_direction_group.addButton(self._arch_raise_radio)
         self._arch_direction_group.addButton(self._arch_lower_radio)
-        self._arch_raise_radio.toggled.connect(lambda _: self._update_arch_preview_label())
+        self._arch_raise_radio.toggled.connect(lambda _: self._on_arch_inputs_changed())
         dir_row.addWidget(self._arch_raise_radio)
         dir_row.addWidget(self._arch_lower_radio)
         layout.addLayout(dir_row)
@@ -845,7 +857,7 @@ class MainWindow(QMainWindow):
         self._arch_smooth.setRange(0.5, 5.0)
         self._arch_smooth.setSingleStep(0.5)
         self._arch_smooth.setValue(self._defaults["arch"]["smoothing"])
-        self._arch_smooth.valueChanged.connect(lambda _: self._update_arch_preview_label())
+        self._arch_smooth.valueChanged.connect(lambda _: self._on_arch_inputs_changed())
         layout.addWidget(self._arch_smooth)
 
         btn_apply = QPushButton("④ アーチ調整を適用")
@@ -1021,6 +1033,7 @@ class MainWindow(QMainWindow):
             # 置き換わるため、再読込ではなくこのキャッシュを常に「元データ」として使う。
             self._original_bytes = Path(path).read_bytes()
             self._original_filename = Path(path).name
+            self._ensure_mini_3d()
             self._refresh_heatmaps()
             self._dirty = False
             self._load_patient_fields()
@@ -1334,6 +1347,7 @@ class MainWindow(QMainWindow):
         if index != 0:
             self._hm_left.set_angle_guide(None)
             self._hm_right.set_angle_guide(None)
+        self._refresh_mini_3d()
 
     # ──────────────────────────────────────────
     # アーチ調整
@@ -1352,6 +1366,7 @@ class MainWindow(QMainWindow):
             self._btn_erase_select.setChecked(False)
         if checked and self._btn_smooth_select.isChecked():
             self._btn_smooth_select.setChecked(False)
+        self._refresh_mini_3d()
 
     def _sync_arch_select_mode(self, *_args):
         if not self._btn_arch_select.isChecked():
@@ -1363,13 +1378,14 @@ class MainWindow(QMainWindow):
         self._arch_params.mask = None
         self._hm_left.set_mirror_mask(None)
         self._hm_right.set_mirror_mask(None)
-        self._update_arch_preview_label()
+        self._on_arch_inputs_changed()
 
     def _clear_arch_selection(self):
         self._hm_left.clear_selection()
         self._hm_right.clear_selection()
         self._hm_left.set_mirror_mask(None)
         self._hm_right.set_mirror_mask(None)
+        self._refresh_mini_3d()
 
     def _on_arch_mirror_toggled(self, checked: bool):
         if not checked:
@@ -1382,10 +1398,11 @@ class MainWindow(QMainWindow):
             if mask.any():
                 other = self._hm_right if foot == "left" else self._hm_left
                 other.set_mirror_mask(np.fliplr(mask))
+        self._refresh_mini_3d()
 
     def _on_arch_slider(self, val: int):
         self._arch_params.height_mm = val / 2.0
-        self._update_arch_preview_label()
+        self._on_arch_inputs_changed()
 
     def _arch_signed_height_mm(self) -> float:
         magnitude = self._arch_slider.value() / 2.0
@@ -1401,7 +1418,13 @@ class MainWindow(QMainWindow):
                 other.set_mirror_mask(np.fliplr(mask))
             else:
                 other.set_mirror_mask(None)
+        self._on_arch_inputs_changed()
+
+    def _on_arch_inputs_changed(self) -> None:
+        """アーチ調整の選択範囲・方向・調整量・スムージング幅の変更を、ラベルと埋め込み3Dに反映する。
+        ラベル更新は選択が空だと途中でreturnするため、3D更新はここで別に呼ぶ。"""
         self._update_arch_preview_label()
+        self._refresh_mini_3d()
 
     def _update_arch_preview_label(self):
         mask = self._arch_params.mask
@@ -1628,6 +1651,7 @@ class MainWindow(QMainWindow):
         """
         if not self._model:
             raise ValueError("_build_3d_axes はモデル読み込み後にのみ呼び出せる")
+        from foot3d_preview import apply_true_scale
 
         feet = [
             (0, self._model.left_grid, self._model.locked_left_grid, "左足"),
@@ -1647,7 +1671,8 @@ class MainWindow(QMainWindow):
                 wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
                 rows, cols = grid.shape
                 ax.set_title(label, fontsize=12, color='white', pad=-15)
-                ax.set_box_aspect([cols, rows, 2])
+                # 実寸 1:1:1（高さ範囲は足ごとに変えず固定）。浅い足ほど高さが強調される見え方を防ぐ
+                apply_true_scale(ax, rows, cols)
                 ax.view_init(elev=25, azim=_initial_azim(foot_idx))
                 ax.set_axis_off()
                 self._3d_axes.append(ax)
@@ -1668,9 +1693,9 @@ class MainWindow(QMainWindow):
                     wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
                     rows, cols = grid.shape
                     ax.set_title(f"{label} {display_label}", fontsize=10, color='white', pad=-10)
-                    # 3軸の相対スケールは通常モードと同じ実比率のまま、
+                    # 3軸の相対スケールは通常モードと同じ実寸 1:1:1 のまま、
                     # zoomのみでカメラを寄せて画面をある程度大きく使う
-                    ax.set_box_aspect([cols, rows, 2], zoom=_SPLIT_ZOOM)
+                    apply_true_scale(ax, rows, cols, zoom=_SPLIT_ZOOM)
                     ax.view_init(elev=elev, azim=azim)
                     if flip_x:
                         ax.invert_xaxis()
@@ -1821,6 +1846,54 @@ class MainWindow(QMainWindow):
         self._3d_dialog = dlg
         dlg.show()
 
+    def _ensure_mini_3d(self) -> None:
+        """ヒートマップ横の埋め込み3Dを（初回のみ）生成する。"""
+        if not self._model:
+            raise ValueError("_ensure_mini_3d はモデル読み込み後にのみ呼び出せる")
+        if not self._mini_3d:
+            from foot3d_preview import Foot3DPreview, INITIAL_AZIM_LEFT, INITIAL_AZIM_RIGHT
+            for foot, hm, azim in (
+                ("left", self._hm_left, INITIAL_AZIM_LEFT),
+                ("right", self._hm_right, INITIAL_AZIM_RIGHT),
+            ):
+                view = Foot3DPreview(initial_azim=azim)
+                hm.set_side_widget(view)
+                self._mini_3d[foot] = view
+
+    def _set_mini_3d_view(self, label: str) -> None:
+        """埋め込み3Dを、既存3D表示の視点ボタン（_VIEW_GROUPS）と同じ定義で両足まとめて切り替える。"""
+        _, elev, azim, flip_x, _, _ = _lookup_view(label)
+        for view in self._mini_3d.values():
+            view.set_view(elev, azim, flip_x)
+
+    def _reset_mini_3d_view(self) -> None:
+        for view in self._mini_3d.values():
+            view.reset_view()
+
+    def _refresh_mini_3d(self) -> None:
+        """埋め込み3Dに現在形状を表示し、アーチ選択中は選択範囲と適用前の形状プレビューを重ねる。"""
+        if not self._model or not self._mini_3d:
+            return
+        grids = {"left": self._model.left_grid, "right": self._model.right_grid}
+        previews: dict[str, tuple] = {}
+        if self._btn_arch_select.isChecked():
+            foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+            hm = self._hm_left if foot == "left" else self._hm_right
+            mask = hm.get_selection_mask()
+            if mask.any():
+                height_mm = self._arch_signed_height_mm()
+                smoothing = self._arch_smooth.value()
+                params = ArchParams(mask=mask, height_mm=height_mm, smoothing=smoothing)
+                previews[foot] = (self._model.preview_arch(foot, params), mask, False)
+                # 反対足のミラー表示はヒートマップ側（_on_selection_changed）と同じ条件にそろえる
+                if self._tabs.currentIndex() == 1 and self._arch_mirror_check.isChecked():
+                    other = "right" if foot == "left" else "left"
+                    mirror_params = ArchParams(mask=np.fliplr(mask), height_mm=height_mm, smoothing=smoothing)
+                    previews[other] = (self._model.preview_arch(other, mirror_params), mirror_params.mask, True)
+        for foot, view in self._mini_3d.items():
+            preview, mask, mirror = previews.get(foot, (None, None, False))
+            view.set_data(grids[foot], preview, mask, mirror)
+
     # ──────────────────────────────────────────
     # ユーティリティ
     # ──────────────────────────────────────────
@@ -1832,6 +1905,7 @@ class MainWindow(QMainWindow):
         self._hm_right.set_grid(self._model.right_grid)
         self._refresh_layer_list()
         self._refresh_3d()
+        self._refresh_mini_3d()
         self._update_diff_overlay()
 
     def _refresh_layer_list(self):
@@ -1865,6 +1939,7 @@ class MainWindow(QMainWindow):
             self._hm_left.set_grid(self._model.left_grid)
             self._hm_right.set_grid(self._model.right_grid)
             self._refresh_3d()
+            self._refresh_mini_3d()
             name = self._model.layers[i].name
             state = "有効" if enabled else "無効"
             self._update_status(f"レイヤー {state}: {name}")
@@ -2019,5 +2094,5 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(_resource_path("アイコン.ico")))
     win = MainWindow()
-    win.show()
+    win.showMaximized()  # 横の3Dはヒートマップ右の余白に出るため、最大化で開く
     sys.exit(app.exec())

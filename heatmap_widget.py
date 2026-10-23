@@ -12,6 +12,8 @@ CBAR_W = 12           # カラーバー幅 (px)
 MAX_DEPTH = 20.0      # スケール最大 (mm)
 MIN_CELL_PX = 12      # 最小セルサイズ
 DEFAULT_CELL_PX = 28  # デフォルトセルサイズ
+SIDE_GAP = 16         # グリッド右端と余白ウィジェットの間隔 (px)
+SIDE_MIN_W = 160      # 余白ウィジェットを表示する最小幅 (px)。これ未満なら隠す
 
 
 # UltraFoot準拠カラーストップ: (t, R, G, B)
@@ -70,6 +72,7 @@ class HeatmapWidget(QWidget):
         self._angle_guide: tuple | None = None
         self._diff_grid: np.ndarray | None = None
         self._cell_px: int = DEFAULT_CELL_PX
+        self._side_widget: QWidget | None = None
 
         rows, cols = 32, 16
         self.setMinimumSize(
@@ -88,8 +91,30 @@ class HeatmapWidget(QWidget):
 
     def resizeEvent(self, event):
         self._cell_px = self._compute_cell_px()
+        self._layout_side_widget()
         self.update()
         super().resizeEvent(event)
+
+    def set_side_widget(self, widget: QWidget) -> None:
+        """グリッド右側の黒い余白に置く子ウィジェットを設定する（埋め込み3Dプレビュー用）。"""
+        self._side_widget = widget
+        widget.setParent(self)
+        self._layout_side_widget()
+
+    def _layout_side_widget(self) -> None:
+        """余白にside widgetを配置し、余白が狭すぎるときは隠す。
+        表示前はresizeEventが届かず_cell_pxが古いことがあるため、セルサイズはここで再計算する。"""
+        if self._side_widget is None:
+            return
+        rows, cols = self._grid.shape
+        cp = self._compute_cell_px()
+        x = MARGIN_LEFT + cols * cp + SIDE_GAP
+        w = self.width() - x - 8
+        if w < SIDE_MIN_W:
+            self._side_widget.hide()
+            return
+        self._side_widget.setGeometry(x, MARGIN_TOP, w, rows * cp)
+        self._side_widget.show()
 
     def set_grid(self, grid: np.ndarray):
         self._grid = grid.copy()

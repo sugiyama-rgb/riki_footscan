@@ -101,3 +101,52 @@ def test_undo_restores_grid_before_lower_adjustment():
 
     assert model.undo() is True
     assert np.array_equal(model.grd.grid, before)
+
+
+# ─────────────────────── 適用前の形状プレビュー（埋め込み3D用） ───────────────────────
+
+def _make_varied_model() -> FootModel:
+    """一様でない深さを持つモデル（クリップ・ぼかしの差が検出できるように）。"""
+    rng = np.random.default_rng(0)
+    grid = -rng.uniform(1.0, 15.0, size=(grd_io.GRID_ROWS, grd_io.GRID_COLS))
+    grd = grd_io.GrdData(grid=grid, patient=grd_io.PatientInfo(), raw_meta_lines=[])
+    return FootModel(grd)
+
+
+@pytest.mark.parametrize("height_mm", [5.0, -6.0])
+def test_preview_arch_matches_grid_after_apply_arch(height_mm):
+    model = _make_varied_model()
+    params = ArchParams(mask=_rect_mask(10, 20, 4, 12), height_mm=height_mm, smoothing=1.5)
+    preview = model.preview_arch("left", params)
+    model.apply_arch("left", params)
+    np.testing.assert_allclose(preview, model.left_grid)
+
+
+def test_preview_arch_matches_apply_with_locked_disabled_and_prior_layers():
+    model = _make_varied_model()
+    model.apply_position_adjust("right", 1.0, -1.0)
+    model.toggle_layer_lock(0)
+    model.erase_cells("right", _rect_mask(0, 3, 0, 16))
+    model.toggle_layer(1)
+    model.apply_arch("right", ArchParams(mask=_rect_mask(5, 9, 2, 6), height_mm=3.0, smoothing=1.0))
+    params = ArchParams(mask=_rect_mask(12, 22, 6, 13), height_mm=-4.0, smoothing=2.0)
+
+    preview = model.preview_arch("right", params)
+    model.apply_arch("right", params)
+    np.testing.assert_allclose(preview, model.right_grid)
+
+
+def test_preview_arch_does_not_add_layer_or_change_grid():
+    model = _make_varied_model()
+    before = model.grd.grid.copy()
+    model.preview_arch("left", ArchParams(mask=_rect_mask(10, 20, 4, 12), height_mm=5.0, smoothing=1.5))
+    assert model.layers == []
+    assert np.array_equal(model.grd.grid, before)
+
+
+@pytest.mark.parametrize("mask", [None, np.zeros((32, 16), dtype=bool)])
+def test_preview_arch_with_empty_mask_returns_current_grid(mask):
+    model = _make_varied_model()
+    preview = model.preview_arch("left", ArchParams(mask=mask, height_mm=5.0, smoothing=1.5))
+    assert np.array_equal(preview, model.left_grid)
+    assert not np.shares_memory(preview, model.grd.grid)

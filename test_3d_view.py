@@ -83,3 +83,32 @@ def test_render_with_old_artists_replaces_instead_of_accumulating(ax, grid, base
     assert after_count == before_count
     assert wf2 is not wf1
     assert bwf2 is not bwf1
+
+
+# ─────────────────────── 実寸表示（既存の「3D表示を開く」） ───────────────────────
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PyQt6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.mark.parametrize("split_mode", [False, True])
+@pytest.mark.parametrize("deepest_mm", [5.0, 20.0])
+def test_3d_dialog_axes_are_true_scale_regardless_of_foot_depth(qapp, split_mode, deepest_mm):
+    import grd_io
+    from foot_model import FootModel
+    from main import MainWindow
+
+    grid = np.zeros((grd_io.GRID_ROWS, grd_io.GRID_COLS))
+    grid[5:28, 3:13] = -deepest_mm
+    grid[37:60, 3:13] = -deepest_mm
+    win = MainWindow()
+    win._model = FootModel(grd_io.GrdData(grid=grid, patient=grd_io.PatientInfo(), raw_meta_lines=[]))
+    fig = Figure()
+    win._build_3d_axes(fig, split_mode=split_mode)
+    for ax in win._3d_axes:
+        spans = np.array([abs(np.diff(ax.get_xlim3d())[0]), abs(np.diff(ax.get_ylim3d())[0]),
+                          abs(np.diff(ax.get_zlim3d())[0])])
+        np.testing.assert_allclose(ax._box_aspect / spans, (ax._box_aspect / spans)[0])
+        assert sorted(ax.get_zlim3d()) == pytest.approx([-3.0, 0.0])
