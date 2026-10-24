@@ -156,31 +156,26 @@ def test_set_reference_mask_does_not_mutate_sel_mask(hm):
     assert not mask[3, 4]
 
 
-# ─────────────────────── 余白への埋め込みウィジェット配置（新規） ───────────────────────
+# ─────────────────────── セルサイズの計算（レイアウトと共通） ───────────────────────
 
-def test_side_widget_is_placed_in_blank_area_right_of_grid(qapp):
-    from PyQt6.QtWidgets import QWidget
-    from heatmap_widget import MARGIN_LEFT, MARGIN_TOP
+def test_cell_px_for_is_limited_by_height_when_width_is_ample():
+    from heatmap_widget import MARGIN_TOP, cell_px_for
+    assert cell_px_for(10_000, 32 * 25 + MARGIN_TOP + 30) == 25
 
+
+def test_cell_px_for_is_limited_by_width_when_narrow():
+    from heatmap_widget import MARGIN_LEFT, cell_px_for
+    assert cell_px_for(MARGIN_LEFT + 10 + 16 * 20, 10_000) == 20
+
+
+def test_cell_px_for_respects_min_and_max():
+    from heatmap_widget import MIN_CELL_PX, cell_px_for
+    assert cell_px_for(100, 100) == MIN_CELL_PX
+    assert cell_px_for(10_000, 10_000) == 50
+
+
+def test_widget_cell_size_uses_cell_px_for(qapp):
+    from heatmap_widget import cell_px_for
     hm = HeatmapWidget("テスト")
-    hm.resize(800, 700)
-    side = QWidget()
-    hm.set_side_widget(side)
-
-    cp = hm._compute_cell_px()
-    x = MARGIN_LEFT + 16 * cp + 16
-    assert side.parent() is hm
-    assert not side.isHidden()
-    g = side.geometry()
-    assert (g.x(), g.y(), g.width(), g.height()) == (x, MARGIN_TOP, 800 - x - 8, 32 * cp)
-
-
-def test_side_widget_is_hidden_when_blank_area_is_too_narrow(qapp):
-    from PyQt6.QtWidgets import QWidget
-
-    hm = HeatmapWidget("テスト")
-    hm.resize(450, 700)
-    side = QWidget()
-    hm.set_side_widget(side)
-
-    assert side.isHidden()
+    hm.resize(700, 900)
+    assert hm._compute_cell_px() == cell_px_for(700, 900)

@@ -217,6 +217,18 @@ class FootModel:
             "lost_cells": max(0, before_cells - after_cells),
         }
 
+    def current_position_adjust(self, foot: str) -> tuple[float, float, float]:
+        """その足の位置調整レイヤーの値 (左右cm, 前後cm, 角度°) を返す。無ければすべて0。
+        位置調整は足ごとに1レイヤーを置き換える作りなので、「1cmずつ動かす」操作はこの値に足して適用する。"""
+        layer = next(
+            (l for l in self._layers if l.operation == "position_adjust" and l.params["foot"] == foot),
+            None,
+        )
+        if layer is None:
+            return (0.0, 0.0, 0.0)
+        p = layer.params
+        return (float(p.get("dx_cm", 0.0)), float(p.get("dy_cm", 0.0)), float(p.get("angle_deg", 0.0)))
+
     def apply_position_adjust(self, foot: str, dx_cm: float, dy_cm: float, angle_deg: float = 0.0) -> dict:
         sl = grd_io.LEFT_ROWS if foot == "left" else grd_io.RIGHT_ROWS
         before_cells = int((self._grd.grid[sl] < 0).sum())

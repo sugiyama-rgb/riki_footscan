@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QSplitter, QStatusBar, QFormLayout,
     QListWidget, QListWidgetItem, QDialog, QRadioButton, QButtonGroup, QMenu,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QFont, QIcon
 
 import json
@@ -20,11 +20,92 @@ from platformdirs import user_config_dir
 
 import grd_io
 from foot_model import FootModel, ArchParams, MetatarsalParams, SmoothParams, LayerRecord, preview_arch_max
-from heatmap_widget import HeatmapWidget
+from heatmap_widget import MARGIN_LEFT, MARGIN_TOP, HeatmapWidget, cell_px_for
 from toast_widget import ToastWidget
 from changelog import CHANGELOG_ENTRIES, ChangelogDialog
 from usage_dialog import USAGE_SECTIONS, UsageDialog
 from version import VERSION
+
+
+POSITION_LIMIT_CM = 3.0  # 位置調整の左右・前後の最大量 (cm)
+
+
+# ヒートマップ2枚と両足3Dの配置 [左ヒートマップ][右ヒートマップ][両足3D]
+MAP_HM_GAP = 12      # 左右ヒートマップの間隔 (px)
+MAP_3D_GAP = 12      # ヒートマップと3Dの間隔 (px)
+MAP_3D_MIN_W = 300   # 3Dを表示する最小幅 (px)。これ未満なら3Dを隠してヒートマップを広げる
+
+
+def compute_map_layout(width: int, height: int, show_3d: bool) -> tuple[tuple, tuple, tuple | None]:
+    """ヒートマップ2枚と3Dの配置 (x, y, w, h) を返す: (左ヒートマップ, 右ヒートマップ, 3D or None)。
+    ヒートマップは方眼がちょうど収まる幅にし、残りの幅を右端の3Dに渡す。
+    3Dを出さない（無効・幅不足）ときは、ヒートマップが今までどおり幅いっぱいに広がる。"""
+    cp = cell_px_for(10_000, height)  # 高さで決まるセルサイズ
+    hm_w = MARGIN_LEFT + 16 * cp + 10
+    rest = width - 2 * hm_w - MAP_HM_GAP - MAP_3D_GAP
+    if show_3d and rest >= MAP_3D_MIN_W:
+        x3d = 2 * hm_w + MAP_HM_GAP + MAP_3D_GAP
+        return (
+            (0, 0, hm_w, height),
+            (hm_w + MAP_HM_GAP, 0, hm_w, height),
+            (x3d, MARGIN_TOP, width - x3d, 32 * cp),  # 縦位置はヒートマップの方眼にそろえる
+        )
+    half = (width - MAP_HM_GAP) // 2
+    return (0, 0, half, height), (half + MAP_HM_GAP, 0, width - half - MAP_HM_GAP, height), None
+
+
+class _MapRow(QWidget):
+    """ヒートマップ2枚と両足3Dを compute_map_layout で直接配置する入れ物。
+    固定幅を使わない（使うとウィンドウやスプリッターを縮められなくなる）ため、レイアウトではなく自前で置く。
+    3Dはファイル読込時に作る（起動を遅くしないため）ので、それまでは同じ場所に案内表示を置き、配置を最初から変えない。"""
+
+    def __init__(self, hm_left: QWidget, hm_right: QWidget, parent=None):
+        super().__init__(parent)
+        self._hm_left = hm_left
+        self._hm_right = hm_right
+        self._view: QWidget | None = None
+        self._view_enabled = False
+        hm_left.setParent(self)
+        hm_right.setParent(self)
+        self._placeholder = QLabel("GRDファイルを開くと\n3Dが表示されます", self)
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("background-color: black; color: #888888;")
+
+    def set_3d_widget(self, view: QWidget) -> None:
+        self._view = view
+        view.setParent(self)
+        self._relayout()
+
+    def set_3d_enabled(self, enabled: bool) -> None:
+        self._view_enabled = enabled
+        self._relayout()
+
+    def minimumSizeHint(self) -> QSize:
+        hint = self._hm_left.minimumSize()
+        return QSize(2 * hint.width() + MAP_HM_GAP, hint.height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._relayout()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        left, right, view_rect = compute_map_layout(self.width(), self.height(), show_3d=True)
+        self._hm_left.setGeometry(*left)
+        self._hm_right.setGeometry(*right)
+        use_view = self._view is not None and self._view_enabled
+        shown = self._view if use_view else self._placeholder
+        hidden = [w for w in (self._view, self._placeholder) if w is not None and w is not shown]
+        for w in hidden:
+            w.hide()
+        if view_rect is None:
+            shown.hide()
+        else:
+            shown.setGeometry(*view_rect)
+            shown.show()
 
 
 def _resource_path(name: str) -> str:
@@ -149,15 +230,18 @@ def _layer_list_label(layer: LayerRecord) -> str:
 
 
 # 3D表示の視点定義: (ラベル, elev, azim, flip_x, flip_y_left, flip_y_right)
-# flip_x: 後方視点でX軸（足幅方向）が自然に反転するため補正
+# グリッドは flipud で Y=0 がかかと。matplotlib のカメラは azim=-90 で -Y（かかと側）、azim=90 で +Y（つま先側）にある。
+# 以前は前方/後方の定義が逆だった（「前方」がかかと側から、「後方」がつま先側から見ていた）。
+# flip_x: X軸（足幅方向）の左右反転。前方は両足1画面でドラッグ回転すると鏡像では逆回りになるため反転しない
+#         （正面から見た像なので左右の足は入れ替わって見える）
 # flip_y_left/flip_y_right: 矢状面は左右足で内側/外側が解剖学的に鏡像なため
 #         足ごとにY軸反転有無を分ける
 _ViewSpec = tuple[str, int, int, bool, bool, bool]
 
 _VIEW_GROUPS: list[tuple[str, list[_ViewSpec]]] = [
     ("前額面", [
-        ("前方", 0, -90, False, False, False),
-        ("後方", 0, 90, True, False, False),
+        ("前方", 0, 90, False, False, False),
+        ("後方", 0, -90, False, False, False),
     ]),
     ("矢状面", [
         ("内側", 0, -145, False, True, False),
@@ -422,11 +506,10 @@ class MainWindow(QMainWindow):
         self._3d_axis_feet: list = []
         self._3d_wireframes: list = []
         self._3d_base_wireframes: list = []
-        self._3d_x_flip: list = [False, False]
-        self._3d_y_flip: list = [False, False]
         self._3d_split_mode: bool = False
-        # ヒートマップ横の埋め込み3D（起動を遅くしないよう最初のファイル読込時に生成）
-        self._mini_3d: dict = {}
+        self._3d_feet_view = None  # 「3D表示を開く」の通常画面（両足1画面）
+        # ヒートマップ右の両足3D（起動を遅くしないよう最初のファイル読込時に生成）
+        self._mini_3d = None
 
         self._defaults = _load_settings()
         self._build_ui()
@@ -469,17 +552,14 @@ class MainWindow(QMainWindow):
         foot_label.setFont(font)
         map_layout.addWidget(foot_label)
 
-        maps_row = QHBoxLayout()
         self._hm_left = HeatmapWidget("左足")
         self._hm_right = HeatmapWidget("右足")
         self._hm_left.cellClicked.connect(lambda r, c: self._on_cell_clicked("left", r, c))
         self._hm_right.cellClicked.connect(lambda r, c: self._on_cell_clicked("right", r, c))
         self._hm_left.selectionChanged.connect(lambda mask: self._on_selection_changed("left", mask))
         self._hm_right.selectionChanged.connect(lambda mask: self._on_selection_changed("right", mask))
-        maps_row.addWidget(self._hm_left)
-        maps_row.addSpacing(12)
-        maps_row.addWidget(self._hm_right)
-        map_layout.addLayout(maps_row)
+        self._map_row = _MapRow(self._hm_left, self._hm_right)
+        map_layout.addWidget(self._map_row, stretch=1)
 
         splitter.addWidget(map_area)
 
@@ -531,13 +611,11 @@ class MainWindow(QMainWindow):
         view_form.addWidget(btn_3d)
         # ヒートマップ横の埋め込み3Dの視点（両足まとめて切り替える）
         mini_view_row = QHBoxLayout()
-        mini_view_row.addWidget(QLabel("横の3D:"))
-        btn_mini_top = QPushButton("真上")
-        btn_mini_top.clicked.connect(self._reset_mini_3d_view)
-        btn_mini_back = QPushButton("後面")
-        btn_mini_back.clicked.connect(lambda: self._set_mini_3d_view("後方"))
-        mini_view_row.addWidget(btn_mini_top)
-        mini_view_row.addWidget(btn_mini_back)
+        mini_view_row.addWidget(QLabel("右の3D:"))
+        for label, preset in (("標準", "standard"), ("真上", "top"), ("後面", "back")):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, p=preset: self._set_mini_3d_view(p))
+            mini_view_row.addWidget(btn)
         view_form.addLayout(mini_view_row)
         tool_layout.addWidget(view_box)
 
@@ -608,10 +686,27 @@ class MainWindow(QMainWindow):
         self._pos_foot_combo.addItems(["左足", "右足"])
         pos_layout.addWidget(self._pos_foot_combo)
 
+        # よく使う「左右に1cm」はボタン1回で適用する（押すたびに1cmずつ動く）
+        nudge_row = QHBoxLayout()
+        btn_nudge_left = QPushButton("← 左へ1cm")
+        btn_nudge_left.clicked.connect(lambda: self._nudge_position(-1.0))
+        btn_nudge_right = QPushButton("右へ1cm →")
+        btn_nudge_right.clicked.connect(lambda: self._nudge_position(+1.0))
+        nudge_row.addWidget(btn_nudge_left)
+        nudge_row.addWidget(btn_nudge_right)
+        pos_layout.addLayout(nudge_row)
+        self._pos_current_label = QLabel("")
+        pos_layout.addWidget(self._pos_current_label)
+        self._pos_foot_combo.currentIndexChanged.connect(self._sync_position_inputs)
+
+        lbl_detail = QLabel("前後・角度などの細かい調整:")
+        lbl_detail.setStyleSheet("color: #666666; font-size: 10px;")
+        pos_layout.addWidget(lbl_detail)
+
         dx_row = QHBoxLayout()
         dx_row.addWidget(QLabel("左右方向 (cm, ＋:右／－:左):"))
         self._pos_dx = QDoubleSpinBox()
-        self._pos_dx.setRange(-3.0, 3.0)
+        self._pos_dx.setRange(-POSITION_LIMIT_CM, POSITION_LIMIT_CM)
         self._pos_dx.setSingleStep(1.0)  # 矢印クリック: 1.0cm(10mm)刻み。直接入力は0.1cm単位のまま
         self._pos_dx.setDecimals(1)
         dx_row.addWidget(self._pos_dx)
@@ -620,7 +715,7 @@ class MainWindow(QMainWindow):
         dy_row = QHBoxLayout()
         dy_row.addWidget(QLabel("前後方向 (cm, ＋:かかと側／－:つま先側):"))
         self._pos_dy = QDoubleSpinBox()
-        self._pos_dy.setRange(-3.0, 3.0)
+        self._pos_dy.setRange(-POSITION_LIMIT_CM, POSITION_LIMIT_CM)
         self._pos_dy.setSingleStep(1.0)  # 矢印クリック: 1.0cm(10mm)刻み。直接入力は0.1cm単位のまま
         self._pos_dy.setDecimals(1)
         dy_row.addWidget(self._pos_dy)
@@ -1035,6 +1130,7 @@ class MainWindow(QMainWindow):
             self._original_filename = Path(path).name
             self._ensure_mini_3d()
             self._refresh_heatmaps()
+            self._sync_position_inputs()
             self._dirty = False
             self._load_patient_fields()
             self._update_status(f"読み込み完了: {Path(path).name}")
@@ -1173,20 +1269,15 @@ class MainWindow(QMainWindow):
         self._btn_erase_select.setText(
             "選択モード ON (ドラッグして選択)" if checked else "選択モード OFF"
         )
-        foot = "left" if self._erase_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(checked and foot == "left")
-        self._hm_right.set_select_mode(checked and foot == "right")
-        if checked and self._btn_arch_select.isChecked():
+        if checked:
             self._btn_arch_select.setChecked(False)
-        if checked and self._btn_smooth_select.isChecked():
             self._btn_smooth_select.setChecked(False)
+        self._apply_select_modes()
 
     def _sync_erase_select_mode(self, *_args):
         if not self._btn_erase_select.isChecked():
             return
-        foot = "left" if self._erase_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(foot == "left")
-        self._hm_right.set_select_mode(foot == "right")
+        self._apply_select_modes()
 
     def _clear_erase_selection(self):
         self._hm_left.clear_selection()
@@ -1213,20 +1304,15 @@ class MainWindow(QMainWindow):
         self._btn_smooth_select.setText(
             "選択モード ON (ドラッグ選択 / Shift+ドラッグで矩形選択)" if checked else "選択モード OFF"
         )
-        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(checked and foot == "left")
-        self._hm_right.set_select_mode(checked and foot == "right")
-        if checked and self._btn_erase_select.isChecked():
+        if checked:
             self._btn_erase_select.setChecked(False)
-        if checked and self._btn_arch_select.isChecked():
             self._btn_arch_select.setChecked(False)
+        self._apply_select_modes()
 
     def _sync_smooth_select_mode(self, *_args):
         if not self._btn_smooth_select.isChecked():
             return
-        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(foot == "left")
-        self._hm_right.set_select_mode(foot == "right")
+        self._apply_select_modes()
 
     def _clear_smooth_selection(self):
         self._hm_left.clear_selection()
@@ -1298,7 +1384,23 @@ class MainWindow(QMainWindow):
         if dx == 0.0 and dy == 0.0 and angle == 0.0:
             self._update_status("位置調整: 変更がないため適用しませんでした")
             return
+        self._apply_position(foot, dx, dy, angle)
 
+    def _nudge_position(self, step_cm: float) -> None:
+        """「左へ1cm／右へ1cm」ボタン。今の左右のずれに step_cm を足して適用する（前後・角度は保つ）。"""
+        if not self._model:
+            QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
+            return
+        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        dx, dy, angle = self._model.current_position_adjust(foot)
+        new_dx = dx + step_cm
+        if abs(new_dx) > POSITION_LIMIT_CM + 1e-9:
+            self._update_status(f"位置調整: 左右は ±{POSITION_LIMIT_CM:g}cm までです")
+            return
+        self._apply_position(foot, new_dx, dy, angle)
+
+    def _apply_position(self, foot: str, dx: float, dy: float, angle: float) -> bool:
+        """位置調整を適用する（データが範囲外に出て失われる場合は確認する）。適用したら True。"""
         preview_stats = self._model.preview_position_adjust(foot, dx, dy, angle)
         if preview_stats["lost_cells"] > 0:
             reply = QMessageBox.question(
@@ -1308,12 +1410,43 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
-                return
+                return False
 
         stats = self._model.apply_position_adjust(foot, dx, dy, angle)
         self._refresh_heatmaps()
+        self._sync_position_inputs()
         self._pos_stats_label.setText(f"失われたセル: {stats['lost_cells']}")
         self._update_status(f"位置調整を適用しました（{'左足' if foot == 'left' else '右足'}）")
+        return True
+
+    def _sync_position_inputs(self, *_args) -> None:
+        """位置調整の入力欄と「現在のずれ」表示を、対象足の今の位置調整に合わせる。"""
+        if not self._model:
+            self._pos_current_label.setText("")
+            return
+        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        dx, dy, angle = self._model.current_position_adjust(foot)
+        self._pos_dx.setValue(dx)
+        self._pos_dy.setValue(dy)
+        self._pos_angle_check.setChecked(angle != 0.0)
+        self._pos_angle.setValue(angle)
+        self._update_position_label()
+
+    def _update_position_label(self) -> None:
+        if not self._model:
+            self._pos_current_label.setText("")
+            return
+        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        dx, dy, angle = self._model.current_position_adjust(foot)
+        parts = []
+        if dx:
+            parts.append(f"{'右' if dx > 0 else '左'}へ{abs(dx):g}cm")
+        if dy:
+            parts.append(f"{'かかと側' if dy > 0 else 'つま先側'}へ{abs(dy):g}cm")
+        if angle:
+            parts.append(f"角度{angle:+g}°")
+        foot_label = "左足" if foot == "left" else "右足"
+        self._pos_current_label.setText(f"現在: {foot_label} {'・'.join(parts) if parts else 'ずれなし'}")
 
     def _reset_position_adjust(self):
         self._pos_dx.setValue(0.0)
@@ -1347,7 +1480,24 @@ class MainWindow(QMainWindow):
         if index != 0:
             self._hm_left.set_angle_guide(None)
             self._hm_right.set_angle_guide(None)
+        if index == 1:
+            self._update_arch_preview_label()
         self._refresh_mini_3d()
+
+    def _apply_select_modes(self) -> None:
+        """3つの選択モードボタン（手動消去・スムージング・アーチ調整）の状態から、両ヒートマップの選択可否を決める。
+        ONのボタンの対象足だけ選択可にする。各ボタンのON/OFF処理が呼ばれる順番に左右されないよう、
+        モードの設定はここ1か所で行う（以前はOFF側の処理が、後からONにした側の選択まで解除していた）。"""
+        active = None
+        for btn, combo in (
+            (self._btn_erase_select, self._erase_foot_combo),
+            (self._btn_smooth_select, self._smooth_foot_combo),
+            (self._btn_arch_select, self._arch_foot_combo),
+        ):
+            if btn.isChecked():
+                active = "left" if combo.currentIndex() == 0 else "right"
+        self._hm_left.set_select_mode(active == "left")
+        self._hm_right.set_select_mode(active == "right")
 
     # ──────────────────────────────────────────
     # アーチ調整
@@ -1356,26 +1506,20 @@ class MainWindow(QMainWindow):
         self._btn_arch_select.setText(
             "領域選択モード ON (ドラッグして選択)" if checked else "領域選択モード OFF"
         )
-        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(checked and foot == "left")
-        self._hm_right.set_select_mode(checked and foot == "right")
-        if not checked:
+        if checked:
+            self._btn_erase_select.setChecked(False)
+            self._btn_smooth_select.setChecked(False)
+        else:
             self._hm_left.set_mirror_mask(None)
             self._hm_right.set_mirror_mask(None)
-        if checked and self._btn_erase_select.isChecked():
-            self._btn_erase_select.setChecked(False)
-        if checked and self._btn_smooth_select.isChecked():
-            self._btn_smooth_select.setChecked(False)
-        self._refresh_mini_3d()
+        self._apply_select_modes()
+        self._on_arch_inputs_changed()
 
     def _sync_arch_select_mode(self, *_args):
         if not self._btn_arch_select.isChecked():
             return
-        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(foot == "left")
-        self._hm_right.set_select_mode(foot == "right")
-        # 足が変わったので古いプレビュー状態を破棄する
-        self._arch_params.mask = None
+        self._apply_select_modes()
+        # 足が変わったので古いミラー表示を破棄する
         self._hm_left.set_mirror_mask(None)
         self._hm_right.set_mirror_mask(None)
         self._on_arch_inputs_changed()
@@ -1385,7 +1529,7 @@ class MainWindow(QMainWindow):
         self._hm_right.clear_selection()
         self._hm_left.set_mirror_mask(None)
         self._hm_right.set_mirror_mask(None)
-        self._refresh_mini_3d()
+        self._on_arch_inputs_changed()
 
     def _on_arch_mirror_toggled(self, checked: bool):
         if not checked:
@@ -1412,7 +1556,6 @@ class MainWindow(QMainWindow):
         if self._erase_select_mode or self._smooth_select_mode:
             pass  # erase/スムージング適用時にget_selection_maskで取得するため保持不要
         else:
-            self._arch_params.mask = mask
             other = self._hm_right if foot == "left" else self._hm_left
             if self._tabs.currentIndex() == 1 and self._arch_mirror_check.isChecked():
                 other.set_mirror_mask(np.fliplr(mask))
@@ -1426,11 +1569,22 @@ class MainWindow(QMainWindow):
         self._update_arch_preview_label()
         self._refresh_mini_3d()
 
+    def _current_arch_selection(self) -> tuple[str, np.ndarray] | None:
+        """アーチ選択モードON中で選択があれば (対象足, 選択マスク) を返す。
+        古い状態を持ち回らず、毎回ヒートマップの現在の選択から取る。"""
+        if not self._btn_arch_select.isChecked():
+            return None
+        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+        hm = self._hm_left if foot == "left" else self._hm_right
+        mask = hm.get_selection_mask()
+        return (foot, mask) if mask.any() else None
+
     def _update_arch_preview_label(self):
-        mask = self._arch_params.mask
-        if mask is None or not mask.any():
+        selection = self._current_arch_selection()
+        if selection is None or self._tabs.currentIndex() != 1:
             self._arch_preview_label.setText("")
             return
+        _, mask = selection
         signed_mm = self._arch_signed_height_mm()
         actual = preview_arch_max(mask, signed_mm, self._arch_smooth.value())
         direction_label = "持ち上げ" if signed_mm >= 0 else "免荷（へこみ）"
@@ -1644,13 +1798,14 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────
     # 3D表示
     # ──────────────────────────────────────────
-    def _build_3d_axes(self, fig, split_mode: bool) -> None:
-        """figに通常モード(1x2)または画面分割モード(3x2)のAxes3Dを構築し、
+    def _build_split_3d_axes(self, fig) -> None:
+        """figに画面分割モード(3行=後面/内側面/外側面 × 2列=左右の足)のAxes3Dを構築し、
         self._3d_axes / self._3d_axis_feet / self._3d_wireframes /
         self._3d_base_wireframes を再構築する。呼び出し前にfigはクリア済みであること。
+        通常画面は両足1画面（foot3d_preview.Feet3DView）なのでここでは作らない。
         """
         if not self._model:
-            raise ValueError("_build_3d_axes はモデル読み込み後にのみ呼び出せる")
+            raise ValueError("_build_split_3d_axes はモデル読み込み後にのみ呼び出せる")
         from foot3d_preview import apply_true_scale
 
         feet = [
@@ -1664,55 +1819,30 @@ class MainWindow(QMainWindow):
         self._3d_wireframes = []
         self._3d_base_wireframes = []
 
-        if not split_mode:
+        for row, view_label in enumerate(_SPLIT_VIEW_LABELS):
+            _, elev, azim, flip_x, flip_y_left, flip_y_right = _lookup_view(view_label)
+            display_label = _SPLIT_VIEW_DISPLAY[view_label]
             for foot_idx, grid, base_grid, label in feet:
-                ax = fig.add_subplot(1, 2, foot_idx + 1, projection='3d')
+                subplot_index = row * 2 + foot_idx + 1
+                ax = fig.add_subplot(3, 2, subplot_index, projection='3d')
                 ax.set_facecolor('black')
                 wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
                 rows, cols = grid.shape
-                ax.set_title(label, fontsize=12, color='white', pad=-15)
-                # 実寸 1:1:1（高さ範囲は足ごとに変えず固定）。浅い足ほど高さが強調される見え方を防ぐ
-                apply_true_scale(ax, rows, cols)
-                ax.view_init(elev=25, azim=_initial_azim(foot_idx))
+                ax.set_title(f"{label} {display_label}", fontsize=10, color='white', pad=-10)
+                # 3軸の相対スケールは実寸 1:1:1 のまま、zoomのみでカメラを寄せて画面をある程度大きく使う
+                apply_true_scale(ax, rows, cols, zoom=_SPLIT_ZOOM)
+                ax.view_init(elev=elev, azim=azim)
+                if flip_x:
+                    ax.invert_xaxis()
+                fy = flip_y_right if foot_idx == 1 else flip_y_left
+                if fy:
+                    ax.invert_yaxis()
                 ax.set_axis_off()
+                # ドラッグ回転は有効のままにし、プリセット視点からの微調整を都度行えるようにする
                 self._3d_axes.append(ax)
                 self._3d_axis_feet.append(foot_idx)
                 self._3d_wireframes.append(wf)
                 self._3d_base_wireframes.append(bwf)
-            self._3d_x_flip = [False, False]
-            self._3d_y_flip = [False, False]
-        else:
-            # 3行(方向)×2列(足)
-            for row, view_label in enumerate(_SPLIT_VIEW_LABELS):
-                _, elev, azim, flip_x, flip_y_left, flip_y_right = _lookup_view(view_label)
-                display_label = _SPLIT_VIEW_DISPLAY[view_label]
-                for foot_idx, grid, base_grid, label in feet:
-                    subplot_index = row * 2 + foot_idx + 1
-                    ax = fig.add_subplot(3, 2, subplot_index, projection='3d')
-                    ax.set_facecolor('black')
-                    wf, bwf = _render_foot_surface(ax, grid, base_grid, diff_enabled)
-                    rows, cols = grid.shape
-                    ax.set_title(f"{label} {display_label}", fontsize=10, color='white', pad=-10)
-                    # 3軸の相対スケールは通常モードと同じ実寸 1:1:1 のまま、
-                    # zoomのみでカメラを寄せて画面をある程度大きく使う
-                    apply_true_scale(ax, rows, cols, zoom=_SPLIT_ZOOM)
-                    ax.view_init(elev=elev, azim=azim)
-                    if flip_x:
-                        ax.invert_xaxis()
-                    fy = flip_y_right if foot_idx == 1 else flip_y_left
-                    if fy:
-                        ax.invert_yaxis()
-                    ax.set_axis_off()
-                    # ドラッグ回転は有効のままにし、プリセット視点からの微調整を都度行えるようにする
-                    self._3d_axes.append(ax)
-                    self._3d_axis_feet.append(foot_idx)
-                    self._3d_wireframes.append(wf)
-                    self._3d_base_wireframes.append(bwf)
-            # 分割モードの各Axesは視点固定でこのフラグを使わないが、
-            # self._3d_axes と長さを揃えておかないと、通常モード専用の
-            # 視点切替ボタンが誤って呼ばれた際にIndexErrorでクラッシュする
-            self._3d_x_flip = [False] * len(self._3d_axes)
-            self._3d_y_flip = [False] * len(self._3d_axes)
 
         fig.tight_layout()
 
@@ -1733,6 +1863,7 @@ class MainWindow(QMainWindow):
         from matplotlib.figure import Figure
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
         from PyQt6.QtCore import Qt
+        from foot3d_preview import Feet3DView, INITIAL_VIEW, VIEW_BACK, VIEW_BOTTOM, VIEW_FRONT, VIEW_TOP
 
         dlg = QDialog(self)
         dlg.setWindowTitle("足底3D表示")
@@ -1760,61 +1891,50 @@ class MainWindow(QMainWindow):
         split_btn.setFixedHeight(28)
         split_btn.setStyleSheet(btn_style)
         top_row.addWidget(split_btn)
+        hint = QLabel("左ドラッグ: 回転　右ドラッグ: 拡大・縮小　Shift＋左ドラッグ: 移動　ダブルクリック: 元に戻す")
+        hint.setStyleSheet(lbl_style)
+        top_row.addSpacing(16)
+        top_row.addWidget(hint)
         top_row.addStretch()
         layout.addLayout(top_row)
 
+        # 通常画面: 右の3Dと同じ両足1画面（同じ操作方法）
+        feet_view = Feet3DView()
+        layout.addWidget(feet_view, stretch=1)
+        self._3d_feet_view = feet_view
+
+        # 画面分割モード: 後面・内側面・外側面を左右別に並べる（従来どおり）
         fig = Figure(figsize=(13, 7), facecolor='black')
-        fig.suptitle("足底3D表示", fontsize=13, color='white')
         canvas = FigureCanvas(fig)
-        layout.addWidget(canvas)
-
-        self._3d_split_mode = False
-        self._build_3d_axes(fig, split_mode=False)
+        canvas.hide()
+        layout.addWidget(canvas, stretch=1)
         self._3d_canvas = canvas
-        canvas.draw()
+        self._3d_split_mode = False
 
-        # 視点切替ボタン（通常モード専用、PyQt6ネイティブ）
+        # 視点切替ボタン（通常画面用）。内側・外側は両足1画面では手前の足で奥の足が隠れるため、画面分割モードで見る
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(20, 0, 20, 0)
         btn_row.addStretch()
-
-        for group_name, views in _VIEW_GROUPS:
+        view_groups = [
+            ("", [("標準", INITIAL_VIEW)]),
+            ("前額面", [("前方", VIEW_FRONT), ("後方", VIEW_BACK)]),
+            ("水平面", [("上側", VIEW_TOP), ("下側", VIEW_BOTTOM)]),
+        ]
+        for group_name, views in view_groups:
             group_col = QVBoxLayout()
             group_col.setSpacing(3)
-
             group_lbl = QLabel(group_name)
             group_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             group_lbl.setStyleSheet(lbl_style)
             group_col.addWidget(group_lbl)
-
             pair_row = QHBoxLayout()
             pair_row.setSpacing(6)
-            for view_label, elev, azim, flip_x, flip_y_left, flip_y_right in views:
+            for view_label, angles in views:
                 btn = QPushButton(view_label)
                 btn.setFixedHeight(30)
                 btn.setStyleSheet(btn_style)
-
-                def make_cb(e, a, fx, fy_l, fy_r):
-                    def cb():
-                        if self._3d_split_mode:
-                            # 視点切替ボタンは通常モード専用（分割モード中は非表示）。
-                            # 万一呼ばれても分割モードのAxesには影響させない。
-                            return
-                        for i, ax in enumerate(self._3d_axes):
-                            ax.view_init(elev=e, azim=a)
-                            if self._3d_x_flip[i] != fx:
-                                ax.invert_xaxis()
-                                self._3d_x_flip[i] = fx
-                            fy = fy_r if i == 1 else fy_l
-                            if self._3d_y_flip[i] != fy:
-                                ax.invert_yaxis()
-                                self._3d_y_flip[i] = fy
-                        canvas.draw()
-                    return cb
-
-                btn.clicked.connect(make_cb(elev, azim, flip_x, flip_y_left, flip_y_right))
+                btn.clicked.connect(lambda _=False, v=angles: feet_view.set_view(*v))
                 pair_row.addWidget(btn)
-
             group_col.addLayout(pair_row)
             btn_row.addLayout(group_col)
             btn_row.addStretch()
@@ -1825,10 +1945,16 @@ class MainWindow(QMainWindow):
 
         def _on_split_toggled(checked: bool) -> None:
             self._3d_split_mode = checked
-            fig.clf()
-            fig.suptitle("足底3D表示", fontsize=13, color='white')
-            self._build_3d_axes(fig, split_mode=checked)
-            canvas.draw()
+            if checked:
+                fig.clf()
+                fig.suptitle("足底3D表示（画面分割モード）", fontsize=13, color='white')
+                self._build_split_3d_axes(fig)
+                canvas.draw()
+            else:
+                self._3d_axes = []
+                self._refresh_3d()
+            canvas.setVisible(checked)
+            feet_view.setVisible(not checked)
             view_btn_widget.setVisible(not checked)
 
         split_btn.toggled.connect(_on_split_toggled)
@@ -1836,6 +1962,7 @@ class MainWindow(QMainWindow):
         def _on_3d_closed():
             self._3d_dialog = None
             self._3d_canvas = None
+            self._3d_feet_view = None
             self._3d_axes = []
             self._3d_axis_feet = []
             self._3d_wireframes = []
@@ -1844,55 +1971,49 @@ class MainWindow(QMainWindow):
 
         dlg.finished.connect(_on_3d_closed)
         self._3d_dialog = dlg
+        self._refresh_3d()
         dlg.show()
 
     def _ensure_mini_3d(self) -> None:
-        """ヒートマップ横の埋め込み3Dを（初回のみ）生成する。"""
+        """ヒートマップ右の両足3Dを（初回のみ）生成して表示する。"""
         if not self._model:
             raise ValueError("_ensure_mini_3d はモデル読み込み後にのみ呼び出せる")
-        if not self._mini_3d:
-            from foot3d_preview import Foot3DPreview, INITIAL_AZIM_LEFT, INITIAL_AZIM_RIGHT
-            for foot, hm, azim in (
-                ("left", self._hm_left, INITIAL_AZIM_LEFT),
-                ("right", self._hm_right, INITIAL_AZIM_RIGHT),
-            ):
-                view = Foot3DPreview(initial_azim=azim)
-                hm.set_side_widget(view)
-                self._mini_3d[foot] = view
+        if self._mini_3d is None:
+            from foot3d_preview import Feet3DView
+            self._mini_3d = Feet3DView()
+            self._map_row.set_3d_widget(self._mini_3d)
+        self._map_row.set_3d_enabled(True)
 
-    def _set_mini_3d_view(self, label: str) -> None:
-        """埋め込み3Dを、既存3D表示の視点ボタン（_VIEW_GROUPS）と同じ定義で両足まとめて切り替える。"""
-        _, elev, azim, flip_x, _, _ = _lookup_view(label)
-        for view in self._mini_3d.values():
-            view.set_view(elev, azim, flip_x)
-
-    def _reset_mini_3d_view(self) -> None:
-        for view in self._mini_3d.values():
-            view.reset_view()
+    def _set_mini_3d_view(self, preset: str) -> None:
+        """右の3Dの視点を切り替える（standard=標準, top=真上, back=後面）。"""
+        if self._mini_3d is None:
+            return
+        from foot3d_preview import INITIAL_VIEW, VIEW_BACK, VIEW_TOP
+        views = {"standard": INITIAL_VIEW, "top": VIEW_TOP, "back": VIEW_BACK}
+        self._mini_3d.set_view(*views[preset])
 
     def _refresh_mini_3d(self) -> None:
-        """埋め込み3Dに現在形状を表示し、アーチ選択中は選択範囲と適用前の形状プレビューを重ねる。"""
-        if not self._model or not self._mini_3d:
+        """両足3Dに現在形状を表示し、アーチ選択中は選択範囲と適用前の形状プレビューを重ねる。"""
+        if not self._model or self._mini_3d is None:
             return
-        grids = {"left": self._model.left_grid, "right": self._model.right_grid}
-        previews: dict[str, tuple] = {}
-        if self._btn_arch_select.isChecked():
-            foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
-            hm = self._hm_left if foot == "left" else self._hm_right
-            mask = hm.get_selection_mask()
-            if mask.any():
-                height_mm = self._arch_signed_height_mm()
-                smoothing = self._arch_smooth.value()
-                params = ArchParams(mask=mask, height_mm=height_mm, smoothing=smoothing)
-                previews[foot] = (self._model.preview_arch(foot, params), mask, False)
-                # 反対足のミラー表示はヒートマップ側（_on_selection_changed）と同じ条件にそろえる
-                if self._tabs.currentIndex() == 1 and self._arch_mirror_check.isChecked():
-                    other = "right" if foot == "left" else "left"
-                    mirror_params = ArchParams(mask=np.fliplr(mask), height_mm=height_mm, smoothing=smoothing)
-                    previews[other] = (self._model.preview_arch(other, mirror_params), mirror_params.mask, True)
-        for foot, view in self._mini_3d.items():
-            preview, mask, mirror = previews.get(foot, (None, None, False))
-            view.set_data(grids[foot], preview, mask, mirror)
+        feet = {
+            "left": (self._model.left_grid, None, None, False),
+            "right": (self._model.right_grid, None, None, False),
+        }
+        selection = self._current_arch_selection()
+        if selection is not None:
+            foot, mask = selection
+            height_mm = self._arch_signed_height_mm()
+            smoothing = self._arch_smooth.value()
+            params = ArchParams(mask=mask, height_mm=height_mm, smoothing=smoothing)
+            feet[foot] = (feet[foot][0], self._model.preview_arch(foot, params), mask, False)
+            # 反対足のミラー表示はヒートマップ側（_on_selection_changed）と同じ条件にそろえる
+            if self._tabs.currentIndex() == 1 and self._arch_mirror_check.isChecked():
+                other = "right" if foot == "left" else "left"
+                mirror_params = ArchParams(mask=np.fliplr(mask), height_mm=height_mm, smoothing=smoothing)
+                feet[other] = (feet[other][0], self._model.preview_arch(other, mirror_params),
+                               mirror_params.mask, True)
+        self._mini_3d.set_data(feet["left"], feet["right"])
 
     # ──────────────────────────────────────────
     # ユーティリティ
@@ -1907,6 +2028,7 @@ class MainWindow(QMainWindow):
         self._refresh_3d()
         self._refresh_mini_3d()
         self._update_diff_overlay()
+        self._update_position_label()
 
     def _refresh_layer_list(self):
         self._hm_left.set_reference_mask(None)
@@ -2023,7 +2145,19 @@ class MainWindow(QMainWindow):
         self._hm_right.set_diff_grid(self._model.right_grid - self._model.locked_right_grid)
 
     def _refresh_3d(self):
-        if not self._3d_canvas or not self._3d_axes or not self._model:
+        """「3D表示を開く」を現在のデータで描き直す（通常画面＝両足1画面、または画面分割モード）。"""
+        if not self._model:
+            return
+        if self._3d_feet_view is not None and not self._3d_split_mode:
+            bases = None
+            if self._btn_diff.isChecked():
+                bases = (self._model.locked_left_grid, self._model.locked_right_grid)
+            self._3d_feet_view.set_data(
+                (self._model.left_grid, None, None, False),
+                (self._model.right_grid, None, None, False),
+                bases=bases,
+            )
+        if not self._3d_split_mode or not self._3d_canvas or not self._3d_axes:
             return
         grids = {
             0: (self._model.left_grid, self._model.locked_left_grid),

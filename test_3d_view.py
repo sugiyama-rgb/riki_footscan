@@ -22,7 +22,9 @@ def test_initial_azim_right_foot_is_mirrored():
 
 
 def test_lookup_view_returns_matching_spec():
-    assert _lookup_view("後方") == ("後方", 0, 90, True, False, False)
+    # 後方＝かかと側から（以前は前方と定義が逆だった）
+    assert _lookup_view("後方") == ("後方", 0, -90, False, False, False)
+    assert _lookup_view("前方") == ("前方", 0, 90, False, False, False)
     assert _lookup_view("内側") == ("内側", 0, -145, False, True, False)
     assert _lookup_view("外側") == ("外側", 0, -35, False, False, True)
 
@@ -93,9 +95,8 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.mark.parametrize("split_mode", [False, True])
 @pytest.mark.parametrize("deepest_mm", [5.0, 20.0])
-def test_3d_dialog_axes_are_true_scale_regardless_of_foot_depth(qapp, split_mode, deepest_mm):
+def test_3d_dialog_split_axes_are_true_scale_regardless_of_foot_depth(qapp, deepest_mm):
     import grd_io
     from foot_model import FootModel
     from main import MainWindow
@@ -106,9 +107,50 @@ def test_3d_dialog_axes_are_true_scale_regardless_of_foot_depth(qapp, split_mode
     win = MainWindow()
     win._model = FootModel(grd_io.GrdData(grid=grid, patient=grd_io.PatientInfo(), raw_meta_lines=[]))
     fig = Figure()
-    win._build_3d_axes(fig, split_mode=split_mode)
+    win._build_split_3d_axes(fig)
     for ax in win._3d_axes:
         spans = np.array([abs(np.diff(ax.get_xlim3d())[0]), abs(np.diff(ax.get_ylim3d())[0]),
                           abs(np.diff(ax.get_zlim3d())[0])])
         np.testing.assert_allclose(ax._box_aspect / spans, (ax._box_aspect / spans)[0])
         assert sorted(ax.get_zlim3d()) == pytest.approx([-3.0, 0.0])
+
+
+# ─────────────────────── 「3D表示を開く」の両足1画面 ───────────────────────
+
+def _win_with_model(qapp):
+    import grd_io
+    from foot_model import FootModel
+    from main import MainWindow
+    win = MainWindow()
+    grid = np.zeros((grd_io.GRID_ROWS, grd_io.GRID_COLS))
+    grid[5:28, 3:13] = -8.0
+    grid[37:60, 3:13] = -8.0
+    win._model = FootModel(grd_io.GrdData(grid=grid, patient=grd_io.PatientInfo(), raw_meta_lines=[]))
+    return win
+
+
+def test_3d_dialog_shows_both_feet_in_one_view(qapp):
+    from foot3d_preview import Feet3DView
+    win = _win_with_model(qapp)
+    win._show_3d_view()
+    try:
+        assert isinstance(win._3d_feet_view, Feet3DView)
+        assert win._3d_feet_view._state is not None
+        left, right = win._3d_feet_view._state[:2]
+        np.testing.assert_allclose(left[0], win._model.left_grid)
+        np.testing.assert_allclose(right[0], win._model.right_grid)
+    finally:
+        win._3d_dialog.close()
+
+
+def test_3d_dialog_passes_diff_bases_when_diff_enabled(qapp):
+    win = _win_with_model(qapp)
+    win._btn_diff.setChecked(True)
+    win._show_3d_view()
+    try:
+        bases = win._3d_feet_view._state[2]
+        assert bases is not None
+        np.testing.assert_allclose(bases[0], win._model.locked_left_grid)
+    finally:
+        win._3d_dialog.close()
+

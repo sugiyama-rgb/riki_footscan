@@ -1,5 +1,5 @@
-"""ヒートマップ横の埋め込み3Dプレビュー（Foot3DPreview / compute_highlight / upsample_surface）の
-ユニットテスト（TDD: RED → GREEN）"""
+"""両足を1画面に表示する埋め込み3D（Feet3DView / build_scene / rotate_view / compute_highlight /
+upsample_surface）のユニットテスト（TDD: RED → GREEN）"""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,8 +12,9 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from foot3d_preview import (
-    MIRROR_RGB, SELECT_RGB, Foot3DPreview, apply_true_scale, compute_highlight, depth_brightness,
-    upsample_surface,
+    FEET_GAP_CM, INITIAL_VIEW, MIRROR_RGB, SELECT_RGB, VIEW_BACK, VIEW_BOTTOM, VIEW_FRONT, VIEW_TOP,
+    Feet3DView,
+    apply_true_scale, build_scene, compute_highlight, depth_brightness, rotate_view, upsample_surface,
 )
 
 
@@ -120,72 +121,180 @@ def test_upsample_midpoints_lie_on_lines_between_points():
     assert fine[12, 11] == pytest.approx(-4.0)  # (5,5)と(6,5)の中間
 
 
-# ─────────────────────── Foot3DPreview ───────────────────────
+# ─────────────────────── rotate_view（ドラッグ回転・裏返らない） ───────────────────────
 
-@pytest.fixture
-def view(qapp):
-    w = Foot3DPreview(initial_azim=-55)
-    return w
+@pytest.mark.parametrize("dy_ratio", [-5.0, -0.3, 0.3, 5.0])
+def test_rotate_view_keeps_elevation_between_0_and_90(dy_ratio):
+    for elev in (0.0, 30.0, 90.0):
+        new_elev, _ = rotate_view(elev, -90.0, 0.0, dy_ratio)
+        assert 0.0 <= new_elev <= 90.0
 
+
+def test_dragging_down_tilts_toward_viewer():
+    elev, _ = rotate_view(60.0, -90.0, 0.0, -0.1)  # 下へドラッグ（matplotlibのyは上が正）
+    assert elev < 60.0
+
+
+def test_horizontal_drag_changes_only_azimuth():
+    elev, azim = rotate_view(30.0, -90.0, 0.1, 0.0)
+    assert elev == pytest.approx(30.0)
+    assert azim != pytest.approx(-90.0)
+
+
+# ─────────────────────── build_scene（両足を1つの面に） ───────────────────────
 
 def _grid(value: float = -8.0) -> np.ndarray:
     return np.full((32, 16), value)
 
 
+def _foot(grid=None, preview=None, mask=None, mirror=False):
+    return (_grid() if grid is None else grid, preview, mask, mirror)
+
+
+PER_FOOT = 2 * 16 + 1  # 片足の細かい面の頂点列数
+
+
+def _face_col(foot_idx: int, col: int) -> int:
+    """計測点の列 col を囲む細かい面の列（右足は区切り列の後ろ）。"""
+    return (0 if foot_idx == 0 else PER_FOOT + 1) + 2 * col + 1
+
+
+def _face_row(row: int) -> int:
+    return 2 * (31 - row) + 1  # flipud 後（かかと側が Y=0）
+
+
+def test_scene_separates_feet_with_nan_column_and_offsets_right_foot():
+    scene = build_scene(_foot(), _foot())
+    assert scene["z"].shape == (65, 2 * PER_FOOT + 1)
+    assert np.all(np.isnan(scene["z"][:, PER_FOOT]))   # 区切り列
+    assert not np.isnan(scene["z"][:, :PER_FOOT]).any()
+    assert scene["x"][0, PER_FOOT + 1] == pytest.approx(16 + FEET_GAP_CM - 0.5)  # 右足の左端
+    assert len(scene["wires"]) == 2
+
+
+def test_scene_colors_left_selection_on_left_and_mirror_on_right():
+    mask = _mask_at((10, 3))
+    scene = build_scene(
+        _foot(preview=_grid(), mask=mask),
+        _foot(preview=_grid(), mask=np.fliplr(mask), mirror=True),
+    )
+    c = scene["colors"]
+    r = _face_row(10)
+    yellow = c[r, _face_col(0, 3), :3]
+    orange = c[r, _face_col(1, 12), :3]
+    plain = c[r, _face_col(0, 12), :3]
+    assert yellow[0] > 0.5 and yellow[1] > 0.5 and yellow[2] < 0.5   # 左足の列3に黄色
+    assert orange[0] > 0.5 and orange[1] < orange[0] and orange[2] < 0.5  # 右足の列12にオレンジ
+    assert plain[0] < 0.2 and plain[2] > plain[0]                    # 左足の列12は青のまま
+
+
+# ─────────────────────── Feet3DView ───────────────────────
+
+@pytest.fixture
+def view(qapp):
+    return Feet3DView()
+
+
+def _set(view, left=None, right=None):
+    view.set_data(left or _foot(), right or _foot())
+
+
+def test_draws_one_surface_and_two_wires(view):
+    _set(view)
+    view.flush()
+    assert len(view.axes.collections) == 3
+
+
 def test_repeated_updates_do_not_accumulate_artists(view):
     for v in (-8.0, -7.0, -6.0):
-        view.set_data(_grid(v), None, None, mirror=False)
+        _set(view, _foot(_grid(v)), _foot(_grid(v)))
         view.flush()
-    assert len(view.axes.collections) == 2  # 青い面＋白い線
+    assert len(view.axes.collections) == 3
 
 
-def test_preview_draws_surface_and_wire(view):
-    mask = _mask_at((10, 5))
-    preview = _grid()
-    preview[10, 5] = -5.0
-    view.set_data(_grid(), preview, mask, mirror=False)
-    view.flush()
-    assert len(view.axes.collections) == 2
-
-
-def test_wire_is_drawn_on_top_of_surface(view):
-    view.set_data(_grid(), None, None, mirror=False)
+def test_wires_are_drawn_on_top_of_surface(view):
+    _set(view)
     view.flush()
     assert view.axes.computed_zorder is False
-    surface, wire = view.axes.collections
-    assert wire.get_zorder() > surface.get_zorder()
+    surface, *wires = view.axes.collections
+    assert all(w.get_zorder() > surface.get_zorder() for w in wires)
 
 
 def test_same_input_does_not_render_again(view):
-    view.set_data(_grid(), None, None, mirror=False)
+    _set(view)
     view.flush()
     count = view.render_count
-    view.set_data(_grid(), None, None, mirror=False)
+    _set(view)
     view.flush()
     assert view.render_count == count
 
 
 def test_hidden_widget_defers_rendering_until_flush(view):
-    view.set_data(_grid(), None, None, mirror=False)
+    _set(view)
     assert view.render_count == 0
     view.flush()
     assert view.render_count == 1
 
 
+def test_initial_view_is_from_heel_side_at_an_angle(view):
+    assert (view.axes.elev, view.axes.azim) == pytest.approx(INITIAL_VIEW)
+    assert 0 < INITIAL_VIEW[0] < 90 and INITIAL_VIEW[1] == pytest.approx(-90)
+
+
 def test_user_view_angle_is_kept_across_updates(view):
-    view.set_data(_grid(-8.0), None, None, mirror=False)
+    _set(view, _foot(_grid(-8.0)))
     view.flush()
-    view.axes.view_init(elev=10, azim=30)
-    view.set_data(_grid(-6.0), None, None, mirror=False)
+    view.set_view(10, -60)
+    _set(view, _foot(_grid(-6.0)))
     view.flush()
-    assert view.axes.elev == pytest.approx(10)
-    assert view.axes.azim == pytest.approx(30)
+    assert (view.axes.elev, view.axes.azim) == pytest.approx((10, -60))
 
 
 def test_reset_view_restores_initial_angle(view):
-    view.axes.view_init(elev=10, azim=30)
+    view.set_view(*VIEW_TOP)
     view.reset_view()
-    assert view.axes.azim == pytest.approx(-55)
+    assert (view.axes.elev, view.axes.azim) == pytest.approx(INITIAL_VIEW)
+
+
+def test_back_view_is_from_heel_side_without_mirroring(view):
+    _set(view)
+    view.flush()
+    view.set_view(*VIEW_BACK)
+    assert VIEW_BACK == (0, -90)
+    x0, x1 = view.axes.get_xlim3d()
+    assert x0 < x1  # 左右反転しない（左足が左に見える）
+
+
+def test_wire_fades_only_near_side_views(view):
+    _set(view)
+    view.flush()
+    wires = view.axes.collections[1:]
+    assert all(w.get_alpha() == pytest.approx(1.0) for w in wires)  # 初期視点では薄くしない
+    view.set_view(*VIEW_BACK)
+    assert all(w.get_alpha() < 1.0 for w in wires)
+    view.set_view(*VIEW_TOP)
+    assert all(w.get_alpha() == pytest.approx(1.0) for w in wires)
+
+
+def test_mouse_drag_rotates_without_flipping(view):
+    from types import SimpleNamespace
+    _set(view)
+    view.flush()
+    h = view._canvas.height() or 100
+    view._on_mouse_press(SimpleNamespace(button=1, dblclick=False, x=50, y=50))
+    view._on_mouse_move(SimpleNamespace(x=50, y=50 - 10 * h))  # 大きく下へドラッグ
+    assert view.axes.elev == pytest.approx(0.0)
+    view._on_mouse_move(SimpleNamespace(x=50, y=50 + 10 * h))  # 大きく上へドラッグ
+    assert view.axes.elev == pytest.approx(90.0)
+    view._on_mouse_release(SimpleNamespace(button=1))
+    assert view.axes.roll == pytest.approx(0.0)
+
+
+def test_double_click_resets_view(view):
+    from types import SimpleNamespace
+    view.set_view(*VIEW_TOP)
+    view._on_mouse_press(SimpleNamespace(button=1, dblclick=True, x=0, y=0))
+    assert (view.axes.elev, view.axes.azim) == pytest.approx(INITIAL_VIEW)
 
 
 def _assert_true_scale(ax):
@@ -205,46 +314,23 @@ def test_apply_true_scale_uses_fixed_height_range_and_ortho(qapp):
 
 
 @pytest.mark.parametrize("deepest_mm", [5.0, 20.0])
-def test_embedded_view_is_true_scale_regardless_of_foot_depth(qapp, deepest_mm):
+def test_both_feet_view_is_true_scale_regardless_of_foot_depth(view, deepest_mm):
     grid = np.zeros((32, 16))
     grid[5:28, 3:13] = -deepest_mm
-    w = Foot3DPreview(initial_azim=-90)
-    w.set_data(grid, None, None, mirror=False)
-    w.flush()
-    _assert_true_scale(w.axes)
-    assert w.axes.get_zlim3d() == pytest.approx((-3.0, 0.0))
+    _set(view, _foot(grid), _foot(grid))
+    view.flush()
+    _assert_true_scale(view.axes)
+    assert view.axes.get_zlim3d() == pytest.approx((-3.0, 0.0))
+    assert abs(np.diff(view.axes.get_xlim3d())[0]) == pytest.approx(2 * 16 + FEET_GAP_CM)
 
 
 def test_axis_range_is_kept_when_preview_changes_depth(view):
-    view.set_data(_grid(), None, None, mirror=False)
+    _set(view)
     view.flush()
     before = view.axes.get_zlim3d()
-    view.set_data(_grid(), _grid(-2.0), _mask_at((5, 5)), mirror=False)
+    _set(view, _foot(preview=_grid(-2.0), mask=_mask_at((5, 5))))
     view.flush()
     np.testing.assert_allclose(view.axes.get_zlim3d(), before)
-
-
-# ─────────────────────── 視点切替（後面） ───────────────────────
-
-def test_set_view_with_flip_inverts_x_and_survives_rerender(view):
-    view.set_data(_grid(-8.0), None, None, mirror=False)
-    view.flush()
-    view.set_view(elev=0, azim=90, flip_x=True)
-    view.set_data(_grid(-6.0), None, None, mirror=False)
-    view.flush()
-    x0, x1 = view.axes.get_xlim3d()
-    assert x0 > x1
-    assert view.axes.elev == pytest.approx(0)
-    assert view.axes.azim == pytest.approx(90)
-
-
-def test_reset_view_clears_flip(view):
-    view.set_data(_grid(), None, None, mirror=False)
-    view.flush()
-    view.set_view(elev=0, azim=90, flip_x=True)
-    view.reset_view()
-    x0, x1 = view.axes.get_xlim3d()
-    assert x0 < x1
 
 
 def test_select_color_contrasts_with_blue_surface():
@@ -254,10 +340,171 @@ def test_select_color_contrasts_with_blue_surface():
     assert SURFACE_RGB == (0.0, 0.0, 1.0)
 
 
-def test_wire_is_faded_in_back_view_and_restored_in_top_view(view):
-    view.set_data(_grid(), None, None, mirror=False)
+# ─────────────────────── 右ドラッグでズーム ───────────────────────
+
+def _press(view, button, y, dblclick=False):
+    from types import SimpleNamespace
+    view._on_mouse_press(SimpleNamespace(button=button, dblclick=dblclick, x=50, y=y))
+
+
+def _move(view, y):
+    from types import SimpleNamespace
+    view._on_mouse_move(SimpleNamespace(x=50, y=y))
+
+
+def _release(view, button):
+    from types import SimpleNamespace
+    view._on_mouse_release(SimpleNamespace(button=button))
+
+
+def _zoom_of(view) -> float:
+    return view.zoom
+
+
+def test_right_drag_up_zooms_in_and_keeps_true_scale(view):
+    _set(view)
     view.flush()
-    view.set_view(elev=0, azim=90, flip_x=True)
-    assert view.axes.collections[1].get_alpha() < 1.0
-    view.reset_view()
-    assert view.axes.collections[1].get_alpha() == pytest.approx(1.0)
+    h = view._canvas.height() or 100
+    angle = (view.axes.elev, view.axes.azim)
+    _press(view, 3, 50)
+    _move(view, 50 + h * 0.3)  # 上へ（matplotlibのyは上が正）
+    _release(view, 3)
+    assert _zoom_of(view) > 1.0
+    assert (view.axes.elev, view.axes.azim) == pytest.approx(angle)  # 右ドラッグでは回転しない
+    _assert_true_scale(view.axes)
+
+
+def test_right_drag_down_zooms_out_with_limit(view):
+    _set(view)
+    view.flush()
+    h = view._canvas.height() or 100
+    _press(view, 3, 50)
+    _move(view, 50 - h * 100)  # 大きく下へ
+    _release(view, 3)
+    assert 0.0 < _zoom_of(view) < 1.0
+    assert _zoom_of(view) >= 0.4  # 縮小しすぎない
+
+
+def test_zoom_is_kept_across_updates_and_view_buttons(view):
+    _set(view, _foot(_grid(-8.0)))
+    view.flush()
+    h = view._canvas.height() or 100
+    _press(view, 3, 50)
+    _move(view, 50 + h * 0.3)
+    _release(view, 3)
+    zoomed = _zoom_of(view)
+    _set(view, _foot(_grid(-6.0)))
+    view.flush()
+    view.set_view(*VIEW_BACK)
+    assert _zoom_of(view) == pytest.approx(zoomed)
+
+
+def test_double_click_resets_zoom(view):
+    _set(view)
+    view.flush()
+    h = view._canvas.height() or 100
+    _press(view, 3, 50)
+    _move(view, 50 + h * 0.3)
+    _release(view, 3)
+    _press(view, 1, 50, dblclick=True)
+    assert _zoom_of(view) == pytest.approx(1.0)
+
+
+# ─────────────────────── Shift＋左ドラッグで平行移動 ───────────────────────
+
+def _view_center(view):
+    view.axes.apply_aspect()
+    xs, ys = view.axes.viewLim.intervalx, view.axes.viewLim.intervaly
+    return (xs[0] + xs[1]) / 2, (ys[0] + ys[1]) / 2
+
+
+def test_shift_drag_pans_without_rotating(view):
+    from types import SimpleNamespace
+    _set(view)
+    view.flush()
+    angle = (view.axes.elev, view.axes.azim)
+    before = _view_center(view)
+    view._on_mouse_press(SimpleNamespace(button=1, dblclick=False, x=50, y=50, key=None, modifiers=frozenset({"shift"})))
+    view._on_mouse_move(SimpleNamespace(x=90, y=50))
+    view._on_mouse_release(SimpleNamespace(button=1))
+    after = _view_center(view)
+    assert after[0] < before[0]  # 右へドラッグ → 表示範囲が左へずれる＝絵が右へ動く
+    assert after[1] == pytest.approx(before[1])
+    assert (view.axes.elev, view.axes.azim) == pytest.approx(angle)
+
+
+def test_double_click_resets_pan(view):
+    from types import SimpleNamespace
+    _set(view)
+    view.flush()
+    before = _view_center(view)
+    view._on_mouse_press(SimpleNamespace(button=1, dblclick=False, x=50, y=50, key=None, modifiers=frozenset({"shift"})))
+    view._on_mouse_move(SimpleNamespace(x=90, y=80))
+    view._on_mouse_release(SimpleNamespace(button=1))
+    view._on_mouse_press(SimpleNamespace(button=1, dblclick=True, x=0, y=0, key=None))
+    assert _view_center(view) == pytest.approx(before)
+
+
+# ─────────────────────── 下側からのドラッグ・向きのプリセット ───────────────────────
+
+def test_drag_from_bottom_view_moves_up_continuously():
+    elev, _ = rotate_view(VIEW_BOTTOM[0], VIEW_BOTTOM[1], 0.0, 0.05)  # 少し上へ
+    assert VIEW_BOTTOM[0] < elev < 0
+    elev2, _ = rotate_view(VIEW_BOTTOM[0], VIEW_BOTTOM[1], 0.0, -0.5)  # 下へは下側より下に行かない
+    assert elev2 == pytest.approx(VIEW_BOTTOM[0])
+
+
+def test_view_presets():
+    assert VIEW_FRONT == (0, 90)   # つま先側から
+    assert VIEW_BOTTOM[0] < 0      # 下から
+
+
+# ─────────────────────── 差分表示（補正前との差を色分け） ───────────────────────
+
+def test_diff_colors_use_shared_scale_between_feet():
+    base = _grid(-8.0)
+    left = _grid(-8.0)
+    left[10, 5] = -3.0   # 5mm 持ち上げ
+    right = _grid(-8.0)
+    right[10, 5] = -7.0  # 1mm 持ち上げ
+    scene = build_scene(_foot(left), _foot(right), bases=(base, base))
+    c = scene["colors"]
+    r = _face_row(10)
+    big, small, flat = c[r, _face_col(0, 5), :3], c[r, _face_col(1, 5), :3], c[r, _face_col(0, 12), :3]
+    assert big.sum() > small.sum() > flat.sum() - 1e-9  # 左右で同じ物差し（5mm の方が明るい）
+    assert not np.allclose(big, small)
+
+
+def test_view_set_data_with_bases_renders(view):
+    base = _grid(-8.0)
+    raised = _grid(-8.0)
+    raised[10, 5] = -3.0
+    view.set_data(_foot(raised), _foot(), bases=(base, base))
+    view.flush()
+    assert len(view.axes.collections) == 3
+
+
+
+def test_real_qt_shift_drag_pans_the_view(qapp):
+    # 実際の Qt のマウスイベント（Shift付き）を3Dの画面に送り、平行移動することを確かめる
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    v = Feet3DView()
+    v.resize(400, 800)
+    v.show()
+    qapp.processEvents()
+    _set(v)
+    v.flush()
+    angle = (v.axes.elev, v.axes.azim)
+
+    def send(kind, x, buttons):
+        e = QMouseEvent(kind, QPointF(x, 400), QPointF(x, 400), Qt.MouseButton.LeftButton, buttons,
+                        Qt.KeyboardModifier.ShiftModifier)
+        QApplication.sendEvent(v._canvas, e)
+        qapp.processEvents()
+
+    send(QEvent.Type.MouseButtonPress, 200, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, 260, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseButtonRelease, 260, Qt.MouseButton.NoButton)
+    assert v.axes.pan[0] > 0
+    assert (v.axes.elev, v.axes.azim) == pytest.approx(angle)
