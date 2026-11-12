@@ -51,12 +51,36 @@ def test_turning_on_another_select_mode_keeps_selection_usable(win, first, secon
     assert win._hm_right._select_mode is False
 
 
-def test_select_mode_follows_target_foot_of_the_active_button(win):
-    win._arch_foot_combo.setCurrentIndex(1)  # アーチは右足
-    win._btn_erase_select.setChecked(True)   # 消去は左足
+def test_select_mode_follows_shared_target_foot(win):
+    # 対象足は全項目共通。選択モードON中に右足へ切り替えると、選択できる足も右に移る
+    win._btn_erase_select.setChecked(True)
+    assert win._hm_left._select_mode is True
+    win._set_target_foot("right")
+    assert win._hm_right._select_mode is True
+    assert win._hm_left._select_mode is False
     win._btn_arch_select.setChecked(True)
     assert win._hm_right._select_mode is True
     assert win._hm_left._select_mode is False
+
+
+def test_switching_target_foot_clears_selection_mirror_and_preview(win):
+    _select_arch_cells(win)
+    assert win._hm_right._mirror_mask is not None  # ミラー初期ONなので反対足に表示されている
+    win._set_target_foot("right")
+    assert not win._hm_left.get_selection_mask().any()
+    assert win._hm_left._mirror_mask is None
+    assert win._hm_right._mirror_mask is None
+    assert win._arch_preview_label.text() == ""
+
+
+def test_angle_guide_not_shown_on_arch_tab_when_switching_foot(win):
+    win._model.apply_position_adjust("right", dx_cm=0.0, dy_cm=0.0, angle_deg=3.0)
+    win._tabs.setCurrentIndex(1)
+    win._set_target_foot("right")
+    assert win._hm_left._angle_guide is None
+    assert win._hm_right._angle_guide is None
+    win._tabs.setCurrentIndex(0)  # 前処理に戻ると表示される
+    assert win._hm_right._angle_guide is not None
 
 
 def _select_arch_cells(win):

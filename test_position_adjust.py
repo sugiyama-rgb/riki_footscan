@@ -193,7 +193,7 @@ def _position_layers(model):
 
 
 def test_pressing_right_twice_moves_two_cm_with_single_layer(win):
-    win._pos_foot_combo.setCurrentIndex(0)  # 左足
+    win._set_target_foot("left")  # 左足
     win._nudge_position(+1.0)
     win._nudge_position(+1.0)
     assert win._model.current_position_adjust("left") == (2.0, 0.0, 0.0)
@@ -204,7 +204,7 @@ def test_pressing_right_twice_moves_two_cm_with_single_layer(win):
 
 
 def test_pressing_left_after_right_goes_back(win):
-    win._pos_foot_combo.setCurrentIndex(1)  # 右足
+    win._set_target_foot("right")  # 右足
     win._nudge_position(+1.0)
     win._nudge_position(-1.0)
     assert win._model.current_position_adjust("right")[0] == pytest.approx(0.0)
@@ -212,14 +212,14 @@ def test_pressing_left_after_right_goes_back(win):
 
 
 def test_nudge_keeps_forward_backward_and_angle(win):
-    win._pos_foot_combo.setCurrentIndex(1)
+    win._set_target_foot("right")
     win._model.apply_position_adjust("right", dx_cm=0.0, dy_cm=1.0, angle_deg=2.0)
     win._nudge_position(-1.0)
     assert win._model.current_position_adjust("right") == (-1.0, 1.0, 2.0)
 
 
 def test_nudge_does_not_exceed_limit(win):
-    win._pos_foot_combo.setCurrentIndex(1)
+    win._set_target_foot("right")
     for _ in range(4):
         win._nudge_position(+1.0)
     assert win._model.current_position_adjust("right")[0] == pytest.approx(3.0)
@@ -228,7 +228,7 @@ def test_nudge_does_not_exceed_limit(win):
 def test_nudge_asks_before_losing_cells_and_cancel_keeps_grid(win, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
     win._model = _make_model(right_point=((10, 15), -8.0))  # 右端の列
-    win._pos_foot_combo.setCurrentIndex(1)
+    win._set_target_foot("right")
     asked = []
     monkeypatch.setattr(QMessageBox, "question",
                         lambda *a, **k: asked.append(1) or QMessageBox.StandardButton.No)

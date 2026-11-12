@@ -19,7 +19,7 @@ from datetime import datetime
 from platformdirs import user_config_dir
 
 import grd_io
-from foot_model import FootModel, ArchParams, MetatarsalParams, SmoothParams, LayerRecord, preview_arch_max
+from foot_model import FootModel, ArchParams, SmoothParams, LayerRecord, preview_arch_max
 from heatmap_widget import MARGIN_LEFT, MARGIN_TOP, HeatmapWidget, cell_px_for
 from toast_widget import ToastWidget
 from changelog import CHANGELOG_ENTRIES, ChangelogDialog
@@ -370,51 +370,8 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(arch_box)
 
-        meta_box = QGroupBox("メタターサルサポート 初期値")
-        meta_form = QFormLayout(meta_box)
-
-        self._meta_height = QDoubleSpinBox()
-        self._meta_height.setRange(0.5, 20.0)
-        self._meta_height.setSingleStep(0.5)
-        self._meta_height.setSuffix(" mm")
-        self._meta_height.setValue(defaults["metatarsal"]["height_mm"])
-        meta_form.addRow("高さ:", self._meta_height)
-
-        self._meta_length = QDoubleSpinBox()
-        self._meta_length.setRange(1.0, 10.0)
-        self._meta_length.setSingleStep(0.5)
-        self._meta_length.setSuffix(" cm")
-        self._meta_length.setValue(defaults["metatarsal"]["length_mm"])
-        meta_form.addRow("長さ:", self._meta_length)
-
-        self._meta_width = QDoubleSpinBox()
-        self._meta_width.setRange(0.5, 6.0)
-        self._meta_width.setSingleStep(0.5)
-        self._meta_width.setSuffix(" cm")
-        self._meta_width.setValue(defaults["metatarsal"]["width_mm"])
-        meta_form.addRow("幅:", self._meta_width)
-
-        self._meta_angle = QDoubleSpinBox()
-        self._meta_angle.setRange(-90.0, 90.0)
-        self._meta_angle.setSingleStep(5.0)
-        self._meta_angle.setSuffix(" °")
-        self._meta_angle.setValue(defaults["metatarsal"]["angle_deg"])
-        meta_form.addRow("角度:", self._meta_angle)
-
-        self._meta_smooth = QDoubleSpinBox()
-        self._meta_smooth.setRange(0.0, 3.0)
-        self._meta_smooth.setSingleStep(0.5)
-        self._meta_smooth.setValue(defaults["metatarsal"]["smoothing"])
-        meta_form.addRow("スムージング:", self._meta_smooth)
-
-        self._meta_front_offset = QDoubleSpinBox()
-        self._meta_front_offset.setRange(0.00, 0.40)
-        self._meta_front_offset.setSingleStep(0.05)
-        self._meta_front_offset.setDecimals(2)
-        self._meta_front_offset.setValue(defaults["metatarsal"]["front_offset"])
-        meta_form.addRow("前方オフセット:", self._meta_front_offset)
-
-        layout.addWidget(meta_box)
+        # 画面に出さない設定（metatarsal・last_open_dir など）を保存時に失わないよう元の値を持っておく
+        self._base_values = copy.deepcopy(defaults)
 
         paths_box = QGroupBox("データ保存先")
         paths_form = QFormLayout(paths_box)
@@ -464,24 +421,19 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def get_values(self) -> dict:
-        return {
-            "arch": {
-                "height_mm": self._arch_height.value(),
-                "smoothing": self._arch_smooth.value(),
-            },
-            "metatarsal": {
-                "height_mm": self._meta_height.value(),
-                "length_mm": self._meta_length.value(),
-                "width_mm": self._meta_width.value(),
-                "angle_deg": self._meta_angle.value(),
-                "smoothing": self._meta_smooth.value(),
-                "front_offset": self._meta_front_offset.value(),
-            },
-            "paths": {
-                "original_dir": self._original_dir_edit.text(),
-                "edited_dir": self._edited_dir_edit.text(),
-            },
+        """画面で編集した項目だけを上書きし、それ以外の設定（metatarsal・last_open_dir など）はそのまま返す。"""
+        values = copy.deepcopy(self._base_values)
+        values["arch"] = {
+            **values.get("arch", {}),
+            "height_mm": self._arch_height.value(),
+            "smoothing": self._arch_smooth.value(),
         }
+        values["paths"] = {
+            **values.get("paths", {}),
+            "original_dir": self._original_dir_edit.text(),
+            "edited_dir": self._edited_dir_edit.text(),
+        }
+        return values
 
 
 class MainWindow(QMainWindow):
@@ -495,8 +447,10 @@ class MainWindow(QMainWindow):
         self._original_filename: str | None = None
         self._current_foot = "left"
         self._arch_params = ArchParams()
-        self._meta_params = MetatarsalParams()
         self._erase_select_mode = False
+        # 患者情報: 読み込み時（または最後に反映した時）の画面値と、未保存の変更があるか
+        self._pt_committed: dict[str, str] = {}
+        self._pt_dirty = False
         self._smooth_select_mode = False
         self._dirty = False
 
@@ -533,12 +487,15 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         self._toast = ToastWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(0)
+        root.setSpacing(6)
+
+        # ── 上: 患者情報（メニュー直下に横一列で常時表示）
+        root.addWidget(self._build_patient_bar())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        root.addWidget(splitter)
+        root.addWidget(splitter, stretch=1)
 
         # ── 左: ヒートマップエリア
         map_area = QWidget()
@@ -554,8 +511,6 @@ class MainWindow(QMainWindow):
 
         self._hm_left = HeatmapWidget("左足")
         self._hm_right = HeatmapWidget("右足")
-        self._hm_left.cellClicked.connect(lambda r, c: self._on_cell_clicked("left", r, c))
-        self._hm_right.cellClicked.connect(lambda r, c: self._on_cell_clicked("right", r, c))
         self._hm_left.selectionChanged.connect(lambda mask: self._on_selection_changed("left", mask))
         self._hm_right.selectionChanged.connect(lambda mask: self._on_selection_changed("right", mask))
         self._map_row = _MapRow(self._hm_left, self._hm_right)
@@ -609,14 +564,6 @@ class MainWindow(QMainWindow):
         btn_3d = QPushButton("3D表示を開く")
         btn_3d.clicked.connect(self._show_3d_view)
         view_form.addWidget(btn_3d)
-        # ヒートマップ横の埋め込み3Dの視点（両足まとめて切り替える）
-        mini_view_row = QHBoxLayout()
-        mini_view_row.addWidget(QLabel("右の3D:"))
-        for label, preset in (("標準", "standard"), ("真上", "top"), ("後面", "back")):
-            btn = QPushButton(label)
-            btn.clicked.connect(lambda _=False, p=preset: self._set_mini_3d_view(p))
-            mini_view_row.addWidget(btn)
-        view_form.addLayout(mini_view_row)
         tool_layout.addWidget(view_box)
 
         # 調整レイヤー
@@ -649,15 +596,18 @@ class MainWindow(QMainWindow):
         layer_layout.addWidget(self._layer_list)
         tool_layout.addWidget(layer_box)
 
-        # タブ
+        # 対象足（前処理・アーチ調整で共通）
+        tool_layout.addWidget(self._build_target_foot_box())
+
+        # タブ（0: 前処理, 1: アーチ調整）
         tabs = QTabWidget()
         tabs.addTab(self._build_noise_tab(), "前処理")
         tabs.addTab(self._build_arch_tab(), "アーチ調整")
-        tabs.addTab(self._build_meta_tab(), "メタターサル")
-        tabs.addTab(self._build_patient_tab(), "患者情報")
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
         tool_layout.addWidget(tabs, stretch=1)
+        # 対象足の切替処理はタブ・各部品がそろってから接続する
+        self._foot_group.idToggled.connect(self._on_target_foot_toggled)
 
         tool_layout.addStretch()
 
@@ -681,11 +631,6 @@ class MainWindow(QMainWindow):
         lbl_pos.setWordWrap(True)
         pos_layout.addWidget(lbl_pos)
 
-        pos_layout.addWidget(QLabel("対象足:"))
-        self._pos_foot_combo = QComboBox()
-        self._pos_foot_combo.addItems(["左足", "右足"])
-        pos_layout.addWidget(self._pos_foot_combo)
-
         # よく使う「左右に1cm」はボタン1回で適用する（押すたびに1cmずつ動く）
         nudge_row = QHBoxLayout()
         btn_nudge_left = QPushButton("← 左へ1cm")
@@ -697,7 +642,6 @@ class MainWindow(QMainWindow):
         pos_layout.addLayout(nudge_row)
         self._pos_current_label = QLabel("")
         pos_layout.addWidget(self._pos_current_label)
-        self._pos_foot_combo.currentIndexChanged.connect(self._sync_position_inputs)
 
         lbl_detail = QLabel("前後・角度などの細かい調整:")
         lbl_detail.setStyleSheet("color: #666666; font-size: 10px;")
@@ -737,7 +681,6 @@ class MainWindow(QMainWindow):
 
         self._pos_angle.valueChanged.connect(self._update_position_angle_guide)
         self._pos_angle_check.toggled.connect(self._update_position_angle_guide)
-        self._pos_foot_combo.currentIndexChanged.connect(self._update_position_angle_guide)
 
         btn_apply_pos = QPushButton("適用")
         btn_apply_pos.clicked.connect(self._apply_position_adjust)
@@ -753,6 +696,23 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(pos_box)
 
+        # ミラーコピー（コピー元→先を明示するため、対象足ボタンとは連動させず2つのボタンにする）
+        mirror_copy_box = QGroupBox("ミラーコピー")
+        mirror_copy_layout = QVBoxLayout(mirror_copy_box)
+        mirror_copy_layout.setSpacing(4)
+        lbl_mc = QLabel("片方の足を左右反転して反対側の足に上書きコピーします。")
+        lbl_mc.setWordWrap(True)
+        mirror_copy_layout.addWidget(lbl_mc)
+        mc_row = QHBoxLayout()
+        btn_mc_left_to_right = QPushButton("左足 → 右足にコピー")
+        btn_mc_left_to_right.clicked.connect(lambda: self._apply_mirror_copy("left"))
+        btn_mc_right_to_left = QPushButton("右足 → 左足にコピー")
+        btn_mc_right_to_left.clicked.connect(lambda: self._apply_mirror_copy("right"))
+        mc_row.addWidget(btn_mc_left_to_right)
+        mc_row.addWidget(btn_mc_right_to_left)
+        mirror_copy_layout.addLayout(mc_row)
+        layout.addWidget(mirror_copy_box)
+
         # 自動ノイズ除去
         auto_box = QGroupBox("自動ノイズ除去")
         auto_layout = QVBoxLayout(auto_box)
@@ -765,15 +725,10 @@ class MainWindow(QMainWindow):
         auto_layout.addWidget(btn_auto)
         layout.addWidget(auto_box)
 
-        # ① 手動消去
-        erase_box = QGroupBox("① 手動消去")
+        # 手動消去
+        erase_box = QGroupBox("手動消去")
         erase_layout = QVBoxLayout(erase_box)
         erase_layout.setSpacing(4)
-        erase_layout.addWidget(QLabel("対象足:"))
-        self._erase_foot_combo = QComboBox()
-        self._erase_foot_combo.addItems(["左足", "右足"])
-        self._erase_foot_combo.currentIndexChanged.connect(self._sync_erase_select_mode)
-        erase_layout.addWidget(self._erase_foot_combo)
         lbl_erase = QLabel("ヒートマップ上でドラッグして消去する領域を選択")
         lbl_erase.setWordWrap(True)
         erase_layout.addWidget(lbl_erase)
@@ -789,51 +744,12 @@ class MainWindow(QMainWindow):
         erase_layout.addWidget(btn_apply_erase)
         layout.addWidget(erase_box)
 
-        # ② 左右対称マスク
-        mirror_box = QGroupBox("② 左右対称マスク")
-        mirror_layout = QVBoxLayout(mirror_box)
-        mirror_layout.setSpacing(4)
-        mirror_layout.addWidget(QLabel("正常な足を参照に使用:"))
-        self._mirror_ref_combo = QComboBox()
-        self._mirror_ref_combo.addItems(["左足を参照（右足を整形）", "右足を参照（左足を整形）"])
-        mirror_layout.addWidget(self._mirror_ref_combo)
-        margin_row = QHBoxLayout()
-        margin_row.addWidget(QLabel("余白 (cm):"))
-        self._mirror_margin = QDoubleSpinBox()
-        self._mirror_margin.setRange(0.0, 5.0)
-        self._mirror_margin.setSingleStep(0.5)
-        self._mirror_margin.setValue(1.0)
-        margin_row.addWidget(self._mirror_margin)
-        mirror_layout.addLayout(margin_row)
-        btn_apply_mirror = QPushButton("対称マスクを適用")
-        btn_apply_mirror.clicked.connect(self._apply_mirror_mask)
-        mirror_layout.addWidget(btn_apply_mirror)
-        layout.addWidget(mirror_box)
+        # 左右対称マスクは現在使っていないため画面には出さない（処理 _apply_mirror_mask は残してある）
 
-        # ③ ミラーコピー
-        mirror_copy_box = QGroupBox("③ ミラーコピー")
-        mirror_copy_layout = QVBoxLayout(mirror_copy_box)
-        mirror_copy_layout.setSpacing(4)
-        lbl_mc = QLabel("片方の足を左右反転して反対側の足に上書きコピーします。")
-        lbl_mc.setWordWrap(True)
-        mirror_copy_layout.addWidget(lbl_mc)
-        self._mirror_copy_combo = QComboBox()
-        self._mirror_copy_combo.addItems(["左足 → 右足にコピー", "右足 → 左足にコピー"])
-        mirror_copy_layout.addWidget(self._mirror_copy_combo)
-        btn_apply_mirror_copy = QPushButton("ミラーコピーを実行")
-        btn_apply_mirror_copy.clicked.connect(self._apply_mirror_copy)
-        mirror_copy_layout.addWidget(btn_apply_mirror_copy)
-        layout.addWidget(mirror_copy_box)
-
-        # ④ スムージング
-        smooth_box = QGroupBox("④ スムージング")
+        # スムージング
+        smooth_box = QGroupBox("スムージング")
         smooth_layout = QVBoxLayout(smooth_box)
         smooth_layout.setSpacing(4)
-        smooth_layout.addWidget(QLabel("対象足:"))
-        self._smooth_foot_combo = QComboBox()
-        self._smooth_foot_combo.addItems(["左足", "右足"])
-        self._smooth_foot_combo.currentIndexChanged.connect(self._sync_smooth_select_mode)
-        smooth_layout.addWidget(self._smooth_foot_combo)
         lbl_smooth = QLabel(
             "足部形状と反したスパイク状の凹凸を検出して補正します。\n"
             "ドラッグで個別選択／Shift+ドラッグで矩形選択／Ctrlで選択解除"
@@ -896,13 +812,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(w)
         layout.setSpacing(8)
 
-        # 対象足
-        layout.addWidget(QLabel("対象足:"))
-        self._arch_foot_combo = QComboBox()
-        self._arch_foot_combo.addItems(["左足", "右足"])
-        self._arch_foot_combo.currentIndexChanged.connect(self._sync_arch_select_mode)
-        layout.addWidget(self._arch_foot_combo)
-
         layout.addWidget(QLabel("① ヒートマップ上でアーチ領域を\n   ドラッグして選択してください"))
 
         self._btn_arch_select = QPushButton("領域選択モード ON")
@@ -946,6 +855,12 @@ class MainWindow(QMainWindow):
         row.addWidget(self._arch_spin)
         layout.addLayout(row)
 
+        # プレビュー量はバーを動かしながら見るため、バーの直下に目立つ文字で出す
+        # （下に置くと調整レイヤーが増えたときに画面外へ押し出されて見えなくなる）
+        self._arch_preview_label = QLabel("")
+        self._arch_preview_label.setStyleSheet("color: #1f5fbf; font-size: 13px; font-weight: bold;")
+        layout.addWidget(self._arch_preview_label)
+
         # スムージング
         layout.addWidget(QLabel("スムージング幅 (cm):"))
         self._arch_smooth = QDoubleSpinBox()
@@ -960,12 +875,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn_apply)
 
         self._arch_mirror_check = QCheckBox("反対足にも適用（ミラー）")
+        self._arch_mirror_check.setChecked(True)  # 両足に同じ補正をすることが多いため初期ON
         self._arch_mirror_check.toggled.connect(self._on_arch_mirror_toggled)
         layout.addWidget(self._arch_mirror_check)
-
-        self._arch_preview_label = QLabel("")
-        self._arch_preview_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
-        layout.addWidget(self._arch_preview_label)
 
         self._arch_stats_label = QLabel("")
         self._arch_stats_label.setWordWrap(True)
@@ -988,124 +900,63 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return w
 
-    # ─── メタターサルタブ ───
-    def _build_meta_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(6)
+    # ─── 対象足（前処理・アーチ調整で共通） ───
+    def _build_target_foot_box(self) -> QWidget:
+        box = QGroupBox("対象足")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(6, 6, 6, 6)
+        self._btn_foot_left = QPushButton("左足")
+        self._btn_foot_right = QPushButton("右足")
+        self._foot_group = QButtonGroup(box)
+        self._foot_group.setExclusive(True)
+        for foot_id, btn in ((0, self._btn_foot_left), (1, self._btn_foot_right)):
+            btn.setCheckable(True)
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(
+                "QPushButton:checked { background-color: #1f5fbf; color: white; font-weight: bold; }"
+            )
+            self._foot_group.addButton(btn, foot_id)
+            row.addWidget(btn)
+        self._btn_foot_left.setChecked(True)
+        return box
 
-        layout.addWidget(QLabel("対象足:"))
-        self._meta_foot_combo = QComboBox()
-        self._meta_foot_combo.addItems(["左足", "右足"])
-        layout.addWidget(self._meta_foot_combo)
-
-        layout.addWidget(QLabel("① ヒートマップをクリックして\n   配置位置を指定してください"))
-
-        form = QFormLayout()
-        self._meta_height = QDoubleSpinBox()
-        self._meta_height.setRange(0.5, 20.0)
-        self._meta_height.setSingleStep(0.5)
-        self._meta_height.setValue(self._defaults["metatarsal"]["height_mm"])
-        self._meta_height.valueChanged.connect(self._update_meta_preview)
-
-        self._meta_length = QDoubleSpinBox()
-        self._meta_length.setRange(1.0, 10.0)
-        self._meta_length.setSingleStep(0.5)
-        self._meta_length.setValue(self._defaults["metatarsal"]["length_mm"])
-        self._meta_length.valueChanged.connect(self._update_meta_preview)
-
-        self._meta_width = QDoubleSpinBox()
-        self._meta_width.setRange(0.5, 6.0)
-        self._meta_width.setSingleStep(0.5)
-        self._meta_width.setValue(self._defaults["metatarsal"]["width_mm"])
-        self._meta_width.valueChanged.connect(self._update_meta_preview)
-
-        self._meta_angle = QDoubleSpinBox()
-        self._meta_angle.setRange(-90.0, 90.0)
-        self._meta_angle.setSingleStep(5.0)
-        self._meta_angle.setValue(self._defaults["metatarsal"]["angle_deg"])
-        self._meta_angle.valueChanged.connect(self._update_meta_preview)
-
-        self._meta_smooth = QDoubleSpinBox()
-        self._meta_smooth.setRange(0.0, 3.0)
-        self._meta_smooth.setSingleStep(0.5)
-        self._meta_smooth.setValue(self._defaults["metatarsal"]["smoothing"])
-        self._meta_smooth.valueChanged.connect(self._update_meta_preview)
-
-        self._meta_front_offset = QDoubleSpinBox()
-        self._meta_front_offset.setRange(0.00, 0.40)
-        self._meta_front_offset.setSingleStep(0.05)
-        self._meta_front_offset.setValue(self._defaults["metatarsal"]["front_offset"])
-        self._meta_front_offset.setDecimals(2)
-        self._meta_front_offset.valueChanged.connect(self._update_meta_preview)
-
-        form.addRow("高さ (mm):", self._meta_height)
-        form.addRow("長さ (cm):", self._meta_length)
-        form.addRow("幅 (cm):", self._meta_width)
-        form.addRow("角度 (°):", self._meta_angle)
-        form.addRow("スムージング:", self._meta_smooth)
-        form.addRow("前方オフセット:", self._meta_front_offset)
-        layout.addLayout(form)
-
-        self._meta_pos_label = QLabel("位置: 未設定")
-        layout.addWidget(self._meta_pos_label)
-
-        self._meta_preview_stats_label = QLabel("")
-        self._meta_preview_stats_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
-        layout.addWidget(self._meta_preview_stats_label)
-
-        btn_apply = QPushButton("② メタターサルサポートを適用")
-        btn_apply.clicked.connect(self._apply_metatarsal)
-        layout.addWidget(btn_apply)
-
-        self._meta_mirror_check = QCheckBox("反対足にも適用（ミラー）")
-        layout.addWidget(self._meta_mirror_check)
-
-        self._meta_apply_stats_label = QLabel("")
-        self._meta_apply_stats_label.setWordWrap(True)
-        self._meta_apply_stats_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
-        layout.addWidget(self._meta_apply_stats_label)
-
-        btn_reset_meta = QPushButton("設定値を初期化")
-        btn_reset_meta.clicked.connect(self._reset_meta_params)
-        layout.addWidget(btn_reset_meta)
-
-        step_row2 = QHBoxLayout()
-        btn_undo2 = QPushButton("↩ 戻す")
-        btn_undo2.clicked.connect(self._undo)
-        btn_redo2 = QPushButton("↪ 進む")
-        btn_redo2.clicked.connect(self._redo)
-        step_row2.addWidget(btn_undo2)
-        step_row2.addWidget(btn_redo2)
-        layout.addLayout(step_row2)
-
-        layout.addStretch()
-        return w
-
-    # ─── 患者情報タブ ───
-    def _build_patient_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QFormLayout(w)
-        layout.setSpacing(6)
+    # ─── 患者情報（メニュー直下の横一列バー） ───
+    def _build_patient_bar(self) -> QWidget:
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
 
         self._pt_name = QLineEdit()
+        self._pt_name.setMinimumWidth(160)
         self._pt_shoe_size = QLineEdit()
         self._pt_gender = QComboBox()
         self._pt_gender.addItems(["Male", "Female"])
         self._pt_foot_left = QLineEdit()
         self._pt_foot_right = QLineEdit()
+        for edit in (self._pt_shoe_size, self._pt_foot_left, self._pt_foot_right):
+            edit.setMaximumWidth(70)
 
-        layout.addRow("氏名:", self._pt_name)
-        layout.addRow("靴サイズ:", self._pt_shoe_size)
-        layout.addRow("性別:", self._pt_gender)
-        layout.addRow("左足サイズ:", self._pt_foot_left)
-        layout.addRow("右足サイズ:", self._pt_foot_right)
+        for label, widget, stretch in (
+            ("氏名:", self._pt_name, 2),
+            ("靴サイズ:", self._pt_shoe_size, 0),
+            ("性別:", self._pt_gender, 0),
+            ("左足サイズ:", self._pt_foot_left, 0),
+            ("右足サイズ:", self._pt_foot_right, 0),
+        ):
+            row.addWidget(QLabel(label))
+            row.addWidget(widget, stretch)
+            row.addSpacing(10)
+        row.addStretch(3)
 
-        btn_save_pt = QPushButton("患者情報を保存")
-        btn_save_pt.clicked.connect(self._save_patient_info)
-        layout.addRow(btn_save_pt)
+        # 保存ボタンは置かず、入力を終えた時点で反映する（ファイル保存時に一緒に書き込まれる）
+        for edit in (self._pt_name, self._pt_shoe_size, self._pt_foot_left, self._pt_foot_right):
+            edit.editingFinished.connect(self._commit_patient_fields)
+        self._pt_gender.currentIndexChanged.connect(lambda _: self._commit_patient_fields())
 
-        return w
+        bar.setEnabled(False)  # ファイルを開くまでは入力不可
+        self._patient_bar = bar
+        return bar
 
     # ──────────────────────────────────────────
     # ファイル操作
@@ -1133,6 +984,7 @@ class MainWindow(QMainWindow):
             self._sync_position_inputs()
             self._dirty = False
             self._load_patient_fields()
+            self._patient_bar.setEnabled(True)
             self._update_status(f"読み込み完了: {Path(path).name}")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"ファイル読み込み失敗:\n{e}")
@@ -1145,6 +997,8 @@ class MainWindow(QMainWindow):
                 self, "エラー", "元データの情報がありません。GRDファイルを開き直してください。"
             )
             return
+        # 入力欄にカーソルが残ったまま（未反映）の患者情報も保存に含める
+        self._commit_patient_fields()
 
         reply = QMessageBox.question(
             self, "確認", "この編集内容でデータが保存されますがよろしいですか？",
@@ -1207,12 +1061,14 @@ class MainWindow(QMainWindow):
             return
 
         self._dirty = False
+        self._pt_dirty = False
         self._update_status(f"保存完了: {Path(self._current_path).name} (履歴: {archive_filename})")
         self._toast.show_message("保存されました")
 
     def _save_as_file(self):
         if not self._model:
             return
+        self._commit_patient_fields()
         path, _ = QFileDialog.getSaveFileName(
             self, "名前をつけて保存", "", "GRD Files (*.grd);;All Files (*)"
         )
@@ -1222,6 +1078,7 @@ class MainWindow(QMainWindow):
             grd_io.save(self._model.grd, path)
             self._current_path = path
             self._dirty = False
+            self._pt_dirty = False
             self._update_status(f"保存完了: {Path(path).name}")
             self._toast.show_message("保存されました")
         except Exception as e:
@@ -1250,7 +1107,8 @@ class MainWindow(QMainWindow):
                 had_layers = bool(self._model.layers)
                 self._model.reset()
                 self._refresh_heatmaps()
-                self._dirty = _reset_marks_dirty(had_layers)
+                # 患者情報はリセット対象外なので、その未保存の変更は残す
+                self._dirty = _reset_marks_dirty(had_layers) or self._pt_dirty
                 self._update_status("リセットしました")
 
     # ──────────────────────────────────────────
@@ -1274,11 +1132,6 @@ class MainWindow(QMainWindow):
             self._btn_smooth_select.setChecked(False)
         self._apply_select_modes()
 
-    def _sync_erase_select_mode(self, *_args):
-        if not self._btn_erase_select.isChecked():
-            return
-        self._apply_select_modes()
-
     def _clear_erase_selection(self):
         self._hm_left.clear_selection()
         self._hm_right.clear_selection()
@@ -1287,7 +1140,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        foot = "left" if self._erase_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         hm = self._hm_left if foot == "left" else self._hm_right
         mask = hm.get_selection_mask()
         if not mask.any():
@@ -1309,11 +1162,6 @@ class MainWindow(QMainWindow):
             self._btn_arch_select.setChecked(False)
         self._apply_select_modes()
 
-    def _sync_smooth_select_mode(self, *_args):
-        if not self._btn_smooth_select.isChecked():
-            return
-        self._apply_select_modes()
-
     def _clear_smooth_selection(self):
         self._hm_left.clear_selection()
         self._hm_right.clear_selection()
@@ -1322,7 +1170,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        foot = "left" if self._smooth_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         hm = self._hm_left if foot == "left" else self._hm_right
         mask = hm.get_selection_mask()
         if not mask.any():
@@ -1340,13 +1188,12 @@ class MainWindow(QMainWindow):
         self._smooth_stats_label.setText(f"補正したセル数: {stats['affected']}")
         self._update_status(f"スムージング: {mask.sum()} セル選択 / {stats['affected']} セルを補正")
 
-    def _apply_mirror_mask(self):
+    def _apply_mirror_mask(self, reference_foot: str, margin: float = 1.0):
+        """左右対称マスク。現在は画面に出していない（再び使うときはボタンからこれを呼ぶ）。"""
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        reference_foot = "left" if self._mirror_ref_combo.currentIndex() == 0 else "right"
-        margin = self._mirror_margin.value()
-        n = self._model.apply_mirror_mask(reference_foot, margin)
+        n =self._model.apply_mirror_mask(reference_foot, margin)
         if n == 0 and not (self._model.grd.grid[
                 grd_io.LEFT_ROWS if reference_foot == "left" else grd_io.RIGHT_ROWS
             ] < 0).any():
@@ -1356,11 +1203,11 @@ class MainWindow(QMainWindow):
         target = "右足" if reference_foot == "left" else "左足"
         self._update_status(f"対称マスク: {target}から {n} ピンをゼロ化 (余白{margin:.1f}cm)")
 
-    def _apply_mirror_copy(self):
+    def _apply_mirror_copy(self, source: str):
+        """source（"left"/"right"）の足を左右反転して反対の足に上書きコピーする。"""
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        source = "left" if self._mirror_copy_combo.currentIndex() == 0 else "right"
         src_label = "左足" if source == "left" else "右足"
         tgt_label = "右足" if source == "left" else "左足"
         reply = QMessageBox.question(
@@ -1377,7 +1224,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         dx = self._pos_dx.value()
         dy = self._pos_dy.value()
         angle = self._pos_angle.value() if self._pos_angle_check.isChecked() else 0.0
@@ -1391,7 +1238,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         dx, dy, angle = self._model.current_position_adjust(foot)
         new_dx = dx + step_cm
         if abs(new_dx) > POSITION_LIMIT_CM + 1e-9:
@@ -1424,7 +1271,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             self._pos_current_label.setText("")
             return
-        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         dx, dy, angle = self._model.current_position_adjust(foot)
         self._pos_dx.setValue(dx)
         self._pos_dy.setValue(dy)
@@ -1436,7 +1283,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             self._pos_current_label.setText("")
             return
-        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         dx, dy, angle = self._model.current_position_adjust(foot)
         parts = []
         if dx:
@@ -1457,7 +1304,12 @@ class MainWindow(QMainWindow):
         self._update_position_angle_guide()
 
     def _update_position_angle_guide(self, *_args):
-        foot = "left" if self._pos_foot_combo.currentIndex() == 0 else "right"
+        # 対象足は全タブ共通になったため、前処理タブ以外では角度ガイドを出さない
+        if self._tabs.currentIndex() != 0:
+            self._hm_left.set_angle_guide(None)
+            self._hm_right.set_angle_guide(None)
+            return
+        foot = self._target_foot()
         hm = self._hm_left if foot == "left" else self._hm_right
         other = self._hm_right if foot == "left" else self._hm_left
         other.set_angle_guide(None)
@@ -1469,10 +1321,6 @@ class MainWindow(QMainWindow):
         hm.set_angle_guide(_compute_angle_guide_line(self._pos_angle.value()))
 
     def _on_tab_changed(self, index: int):
-        if index != 2:
-            self._hm_left.set_overlay(None)
-            self._hm_right.set_overlay(None)
-            self._meta_preview_stats_label.setText("")
         if index != 1:
             self._arch_preview_label.setText("")
             self._hm_left.set_mirror_mask(None)
@@ -1480,24 +1328,48 @@ class MainWindow(QMainWindow):
         if index != 0:
             self._hm_left.set_angle_guide(None)
             self._hm_right.set_angle_guide(None)
+        else:
+            self._update_position_angle_guide()
         if index == 1:
             self._update_arch_preview_label()
         self._refresh_mini_3d()
 
+    # ──────────────────────────────────────────
+    # 対象足（前処理・アーチ調整で共通）
+    # ──────────────────────────────────────────
+    def _target_foot(self) -> str:
+        """対象足ボタンで選ばれている足（"left" / "right"）。"""
+        return "right" if self._btn_foot_right.isChecked() else "left"
+
+    def _set_target_foot(self, foot: str) -> None:
+        if foot not in ("left", "right"):
+            raise ValueError(f"foot は 'left' か 'right' のどちらか: {foot!r}")
+        (self._btn_foot_left if foot == "left" else self._btn_foot_right).setChecked(True)
+
+    def _on_target_foot_toggled(self, _button_id: int, checked: bool) -> None:
+        # 排他グループなので、外れた側(checked=False)と選ばれた側(True)の2回呼ばれる。選ばれた側だけ処理する
+        if not checked:
+            return
+        # 前の足で選んだ範囲を別の足に誤って適用しないよう、選択とミラー表示を消す。
+        # clear_selection は selectionChanged を出さないので、プレビュー・3Dはこの後で明示的に更新する
+        self._hm_left.clear_selection()
+        self._hm_right.clear_selection()
+        self._hm_left.set_mirror_mask(None)
+        self._hm_right.set_mirror_mask(None)
+        self._apply_select_modes()
+        self._sync_position_inputs()
+        self._update_position_angle_guide()
+        self._on_arch_inputs_changed()
+
     def _apply_select_modes(self) -> None:
-        """3つの選択モードボタン（手動消去・スムージング・アーチ調整）の状態から、両ヒートマップの選択可否を決める。
-        ONのボタンの対象足だけ選択可にする。各ボタンのON/OFF処理が呼ばれる順番に左右されないよう、
-        モードの設定はここ1か所で行う（以前はOFF側の処理が、後からONにした側の選択まで解除していた）。"""
-        active = None
-        for btn, combo in (
-            (self._btn_erase_select, self._erase_foot_combo),
-            (self._btn_smooth_select, self._smooth_foot_combo),
-            (self._btn_arch_select, self._arch_foot_combo),
-        ):
-            if btn.isChecked():
-                active = "left" if combo.currentIndex() == 0 else "right"
-        self._hm_left.set_select_mode(active == "left")
-        self._hm_right.set_select_mode(active == "right")
+        """3つの選択モードボタン（手動消去・スムージング・アーチ調整）のどれかがONなら、対象足だけ選択可にする。
+        各ボタンのON/OFF処理が呼ばれる順番に左右されないよう、モードの設定はここ1か所で行う。"""
+        any_on = any(btn.isChecked() for btn in (
+            self._btn_erase_select, self._btn_smooth_select, self._btn_arch_select,
+        ))
+        foot = self._target_foot()
+        self._hm_left.set_select_mode(any_on and foot == "left")
+        self._hm_right.set_select_mode(any_on and foot == "right")
 
     # ──────────────────────────────────────────
     # アーチ調整
@@ -1515,15 +1387,6 @@ class MainWindow(QMainWindow):
         self._apply_select_modes()
         self._on_arch_inputs_changed()
 
-    def _sync_arch_select_mode(self, *_args):
-        if not self._btn_arch_select.isChecked():
-            return
-        self._apply_select_modes()
-        # 足が変わったので古いミラー表示を破棄する
-        self._hm_left.set_mirror_mask(None)
-        self._hm_right.set_mirror_mask(None)
-        self._on_arch_inputs_changed()
-
     def _clear_arch_selection(self):
         self._hm_left.clear_selection()
         self._hm_right.clear_selection()
@@ -1536,7 +1399,7 @@ class MainWindow(QMainWindow):
             self._hm_left.set_mirror_mask(None)
             self._hm_right.set_mirror_mask(None)
         else:
-            foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+            foot = self._target_foot()
             hm = self._hm_left if foot == "left" else self._hm_right
             mask = hm.get_selection_mask()
             if mask.any():
@@ -1574,7 +1437,7 @@ class MainWindow(QMainWindow):
         古い状態を持ち回らず、毎回ヒートマップの現在の選択から取る。"""
         if not self._btn_arch_select.isChecked():
             return None
-        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         hm = self._hm_left if foot == "left" else self._hm_right
         mask = hm.get_selection_mask()
         return (foot, mask) if mask.any() else None
@@ -1595,14 +1458,6 @@ class MainWindow(QMainWindow):
         self._arch_smooth.setValue(self._defaults["arch"]["smoothing"])
         self._arch_raise_radio.setChecked(True)
 
-    def _reset_meta_params(self):
-        self._meta_height.setValue(self._defaults["metatarsal"]["height_mm"])
-        self._meta_length.setValue(self._defaults["metatarsal"]["length_mm"])
-        self._meta_width.setValue(self._defaults["metatarsal"]["width_mm"])
-        self._meta_angle.setValue(self._defaults["metatarsal"]["angle_deg"])
-        self._meta_smooth.setValue(self._defaults["metatarsal"]["smoothing"])
-        self._meta_front_offset.setValue(self._defaults["metatarsal"]["front_offset"])
-
     def _open_settings(self):
         dlg = SettingsDialog(self._defaults, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -1620,7 +1475,7 @@ class MainWindow(QMainWindow):
         if not self._model:
             QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
             return
-        foot = "left" if self._arch_foot_combo.currentIndex() == 0 else "right"
+        foot = self._target_foot()
         hm = self._hm_left if foot == "left" else self._hm_right
         mask = hm.get_selection_mask()
         if not mask.any():
@@ -1657,143 +1512,57 @@ class MainWindow(QMainWindow):
             )
 
     # ──────────────────────────────────────────
-    # メタターサルサポート
-    # ──────────────────────────────────────────
-    def _on_cell_clicked(self, foot: str, row: int, col: int):
-        # メタターサルタブのときのみ配置・プレビュー更新
-        if self._tabs.currentIndex() != 2:
-            return
-        self._meta_params.center_row = row
-        self._meta_params.center_col = col
-        self._meta_pos_label.setText(f"位置: 行{row+1} 列{col+1}")
-        hm = self._hm_left if foot == "left" else self._hm_right
-        hm.set_meta_center((row, col))
-        other = self._hm_right if foot == "left" else self._hm_left
-        if self._meta_mirror_check.isChecked():
-            other.set_meta_center((row, 15 - col))
-        else:
-            other.set_meta_center(None)
-        self._update_meta_preview()
-
-    def _update_meta_preview(self):
-        if not self._model:
-            return
-        foot = "left" if self._meta_foot_combo.currentIndex() == 0 else "right"
-        grid = self._model.left_grid if foot == "left" else self._model.right_grid
-        from foot_model import _make_teardrop_bump
-        common_args = dict(
-            shape=grid.shape,
-            center_rc=(self._meta_params.center_row, self._meta_params.center_col),
-            height=self._meta_height.value(),
-            length=self._meta_length.value(),
-            width=self._meta_width.value(),
-            angle_deg=self._meta_angle.value(),
-            front_offset=self._meta_front_offset.value(),
-        )
-        bump = _make_teardrop_bump(**common_args, smoothing=self._meta_smooth.value())
-        boundary_mask = _make_teardrop_bump(**common_args, smoothing=0) > 0.01
-        hm = self._hm_left if foot == "left" else self._hm_right
-        hm.set_overlay(bump, boundary_mask)
-        other = self._hm_right if foot == "left" else self._hm_left
-        if self._meta_mirror_check.isChecked():
-            mirror_col = 15.0 - self._meta_params.center_col
-            mirror_bump = _make_teardrop_bump(
-                shape=grid.shape,
-                center_rc=(self._meta_params.center_row, mirror_col),
-                height=self._meta_height.value(),
-                length=self._meta_length.value(),
-                width=self._meta_width.value(),
-                angle_deg=-self._meta_angle.value(),
-                front_offset=self._meta_front_offset.value(),
-                smoothing=self._meta_smooth.value(),
-            )
-            mirror_boundary = _make_teardrop_bump(
-                shape=grid.shape,
-                center_rc=(self._meta_params.center_row, mirror_col),
-                height=self._meta_height.value(),
-                length=self._meta_length.value(),
-                width=self._meta_width.value(),
-                angle_deg=-self._meta_angle.value(),
-                front_offset=self._meta_front_offset.value(),
-                smoothing=0,
-            ) > 0.01
-            other.set_overlay(mirror_bump, mirror_boundary)
-        else:
-            other.set_overlay(None)
-        peak = float(np.max(bump)) if bump is not None else 0.0
-        self._meta_preview_stats_label.setText(f"プレビュー最大: {peak:.1f}mm")
-
-    def _apply_metatarsal(self):
-        if not self._model:
-            QMessageBox.information(self, "情報", "先にGRDファイルを開いてください")
-            return
-        foot = "left" if self._meta_foot_combo.currentIndex() == 0 else "right"
-        params = MetatarsalParams(
-            center_row=self._meta_params.center_row,
-            center_col=self._meta_params.center_col,
-            height_mm=self._meta_height.value(),
-            length_mm=self._meta_length.value(),
-            width_mm=self._meta_width.value(),
-            angle_deg=self._meta_angle.value(),
-            smoothing=self._meta_smooth.value(),
-            front_offset=self._meta_front_offset.value(),
-        )
-        stats = self._model.apply_metatarsal(foot, params)
-        hm = self._hm_left if foot == "left" else self._hm_right
-        hm.set_overlay(None)
-        hm.set_meta_center(None)
-        other = self._hm_right if foot == "left" else self._hm_left
-        other.set_overlay(None)
-        other.set_meta_center(None)
-        if self._meta_mirror_check.isChecked():
-            other_foot = "right" if foot == "left" else "left"
-            mirror_params = MetatarsalParams(
-                center_row=params.center_row,
-                center_col=15.0 - params.center_col,
-                height_mm=params.height_mm,
-                length_mm=params.length_mm,
-                width_mm=params.width_mm,
-                angle_deg=-params.angle_deg,
-                smoothing=params.smoothing,
-                front_offset=params.front_offset,
-            )
-            self._model.apply_metatarsal(other_foot, mirror_params)
-        self._refresh_heatmaps()
-        if self._meta_mirror_check.isChecked():
-            self._update_status(f"メタターサルサポートを両足に適用 ({params.height_mm:.1f}mm)")
-        else:
-            self._update_status(f"メタターサルサポートを適用 ({foot}, {params.height_mm:.1f}mm)")
-        self._meta_apply_stats_label.setText(
-            f"設定: {stats['set_mm']:.1f}mm ／ 実測最大: {stats['actual_max']:.1f}mm ／ 影響: {stats['affected']}セル"
-        )
-        self._meta_preview_stats_label.setText("")
-
-    # ──────────────────────────────────────────
     # 患者情報
     # ──────────────────────────────────────────
+    def _patient_field_values(self) -> dict[str, str]:
+        """患者情報バーの今の入力値（キーは PatientInfo の属性名）。"""
+        return {
+            "name": self._pt_name.text(),
+            "shoe_size": self._pt_shoe_size.text(),
+            "gender": self._pt_gender.currentText(),
+            "foot_size_left": self._pt_foot_left.text(),
+            "foot_size_right": self._pt_foot_right.text(),
+        }
+
     def _load_patient_fields(self):
         if not self._model:
             return
         p = self._model.grd.patient
-        self._pt_name.setText(p.name)
-        self._pt_shoe_size.setText(p.shoe_size)
-        idx = 1 if p.gender.lower() == "female" else 0
-        self._pt_gender.setCurrentIndex(idx)
-        self._pt_foot_left.setText(p.foot_size_left)
-        self._pt_foot_right.setText(p.foot_size_right)
+        widgets = (self._pt_name, self._pt_shoe_size, self._pt_gender, self._pt_foot_left, self._pt_foot_right)
+        # 読み込みで「入力された」扱いにならないよう、シグナルを止めて値を入れる
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self._pt_name.setText(p.name)
+            self._pt_shoe_size.setText(p.shoe_size)
+            idx = 1 if p.gender.lower() == "female" else 0
+            self._pt_gender.setCurrentIndex(idx)
+            self._pt_foot_left.setText(p.foot_size_left)
+            self._pt_foot_right.setText(p.foot_size_right)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self._pt_committed = self._patient_field_values()
+        self._pt_dirty = False
 
-    def _save_patient_info(self):
+    def _commit_patient_fields(self) -> bool:
+        """患者情報バーで変更された欄だけを患者情報に反映する。変更があれば True。
+        触っていない欄（例: 画面上は Male と表示される空欄の性別）はファイルの値を書き換えない。"""
         if not self._model:
-            return
+            return False
+        current = self._patient_field_values()
+        changed = {k: v for k, v in current.items() if self._pt_committed.get(k) != v}
+        if not changed:
+            return False
         p = self._model.grd.patient
-        p.name = self._pt_name.text()
-        p.shoe_size = self._pt_shoe_size.text()
-        p.gender = self._pt_gender.currentText()
-        p.foot_size_left = self._pt_foot_left.text()
-        p.foot_size_right = self._pt_foot_right.text()
-        # raw_meta_linesを更新
+        for key, value in changed.items():
+            setattr(p, key, value)
         _update_raw_meta(self._model.grd)
+        self._pt_committed = current
+        self._pt_dirty = True
+        self._dirty = True
         self._update_status("患者情報を更新しました")
+        return True
 
     # ──────────────────────────────────────────
     # 3D表示
@@ -1983,14 +1752,6 @@ class MainWindow(QMainWindow):
             self._mini_3d = Feet3DView()
             self._map_row.set_3d_widget(self._mini_3d)
         self._map_row.set_3d_enabled(True)
-
-    def _set_mini_3d_view(self, preset: str) -> None:
-        """右の3Dの視点を切り替える（standard=標準, top=真上, back=後面）。"""
-        if self._mini_3d is None:
-            return
-        from foot3d_preview import INITIAL_VIEW, VIEW_BACK, VIEW_TOP
-        views = {"standard": INITIAL_VIEW, "top": VIEW_TOP, "back": VIEW_BACK}
-        self._mini_3d.set_view(*views[preset])
 
     def _refresh_mini_3d(self) -> None:
         """両足3Dに現在形状を表示し、アーチ選択中は選択範囲と適用前の形状プレビューを重ねる。"""
@@ -2193,6 +1954,8 @@ class MainWindow(QMainWindow):
             self._toast._reposition()
 
     def closeEvent(self, event) -> None:
+        # 入力欄にカーソルが残ったまま閉じた場合も、未保存の変更として確認を出す
+        self._commit_patient_fields()
         if self._dirty:
             reply = QMessageBox.question(
                 self, "確認", "編集を破棄しますか？",
