@@ -812,7 +812,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(w)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel("① ヒートマップ上でアーチ領域を\n   ドラッグして選択してください"))
+        layout.addWidget(QLabel("ヒートマップ上でアーチ領域を\nドラッグして選択してください"))
 
         self._btn_arch_select = QPushButton("領域選択モード ON")
         self._btn_arch_select.setCheckable(True)
@@ -823,8 +823,13 @@ class MainWindow(QMainWindow):
         btn_clear_sel.clicked.connect(self._clear_arch_selection)
         layout.addWidget(btn_clear_sel)
 
+        # 範囲を選んだらすぐ押せるよう、適用ボタンは「選択をクリア」の直下に置く
+        btn_apply = QPushButton("アーチ調整を適用")
+        btn_apply.clicked.connect(self._apply_arch)
+        layout.addWidget(btn_apply)
+
         # 方向トグル（持ち上げる／へこませる＝免荷）
-        layout.addWidget(QLabel("② 方向を選択してください:"))
+        layout.addWidget(QLabel("方向を選択してください:"))
         dir_row = QHBoxLayout()
         self._arch_raise_radio = QRadioButton("持ち上げる（アーチ）")
         self._arch_lower_radio = QRadioButton("へこませる（免荷）")
@@ -838,7 +843,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(dir_row)
 
         # 高さスライダー（内部値×2: range 2〜40 = 1.0〜20.0mm）
-        layout.addWidget(QLabel("③ 調整量 (0.5〜20 mm):"))
+        layout.addWidget(QLabel("調整量 (0.5〜20 mm):"))
         row = QHBoxLayout()
         self._arch_slider = QSlider(Qt.Orientation.Horizontal)
         self._arch_slider.setRange(2, 40)
@@ -869,10 +874,6 @@ class MainWindow(QMainWindow):
         self._arch_smooth.setValue(self._defaults["arch"]["smoothing"])
         self._arch_smooth.valueChanged.connect(lambda _: self._on_arch_inputs_changed())
         layout.addWidget(self._arch_smooth)
-
-        btn_apply = QPushButton("④ アーチ調整を適用")
-        btn_apply.clicked.connect(self._apply_arch)
-        layout.addWidget(btn_apply)
 
         self._arch_mirror_check = QCheckBox("反対足にも適用（ミラー）")
         self._arch_mirror_check.setChecked(True)  # 両足に同じ補正をすることが多いため初期ON
